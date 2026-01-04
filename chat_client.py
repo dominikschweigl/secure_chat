@@ -18,8 +18,15 @@ class KeyStore:
         private.pem      # User's own private key
         public.pem       # User's own public key
         contacts/
-          {recipient_name}.pem  # Public keys of other users
+          {recipient_name}/
+            public.pem     # Contact's RSA public key
+            symmetric.key  # Symmetric AES key for this contact
     """
+    # File name constants
+    PRIVATE_KEY_FILE = "private.pem"
+    PUBLIC_KEY_FILE = "public.pem"
+    SYMMETRIC_KEY_FILE = "symmetric.key"
+    
     def __init__(self, directory: str = "keys"):
         self.directory = directory
         os.makedirs(self.directory, exist_ok=True)
@@ -35,6 +42,12 @@ class KeyStore:
         contacts_dir = os.path.join(self._get_user_dir(username), "contacts")
         os.makedirs(contacts_dir, exist_ok=True)
         return contacts_dir
+    
+    def _get_contact_dir(self, username: str, contact_username: str) -> str:
+        """Get the directory path for a specific contact."""
+        contact_dir = os.path.join(self._get_contacts_dir(username), contact_username)
+        os.makedirs(contact_dir, exist_ok=True)
+        return contact_dir
 
     def save_own_key(self, username: str, rsa_key: RSA.RsaKey):
         """
@@ -48,13 +61,13 @@ class KeyStore:
             raise ValueError("RSA key or username not set.")
         
         user_dir = self._get_user_dir(username)
-        private_key_path = os.path.join(user_dir, "private.pem")
+        private_key_path = os.path.join(user_dir, self.PRIVATE_KEY_FILE)
         
         with open(private_key_path, "w") as f:
             f.write(rsa_key.export_key().decode("utf-8"))
         
         # Also save public key for convenience
-        public_key_path = os.path.join(user_dir, "public.pem")
+        public_key_path = os.path.join(user_dir, self.PUBLIC_KEY_FILE)
         with open(public_key_path, "w") as f:
             f.write(rsa_key.publickey().export_key().decode("utf-8"))
 
@@ -69,7 +82,7 @@ class KeyStore:
             RSA.RsaKey: The private key
         """
         user_dir = self._get_user_dir(username)
-        private_key_path = os.path.join(user_dir, "private.pem")
+        private_key_path = os.path.join(user_dir, self.PRIVATE_KEY_FILE)
         
         if not os.path.exists(private_key_path):
             raise FileNotFoundError(f"No private key found for user {username}")
@@ -89,8 +102,8 @@ class KeyStore:
         if not public_key or not username or not contact_username:
             raise ValueError("Public key, username, or contact_username not set.")
         
-        contacts_dir = self._get_contacts_dir(username)
-        contact_key_path = os.path.join(contacts_dir, f"{contact_username}.pem")
+        contact_dir = self._get_contact_dir(username, contact_username)
+        contact_key_path = os.path.join(contact_dir, self.PUBLIC_KEY_FILE)
         
         with open(contact_key_path, "w") as f:
             f.write(public_key.export_key().decode("utf-8"))
@@ -106,8 +119,8 @@ class KeyStore:
         Returns:
             RSA.RsaKey | None: The contact's public key or None if not found
         """
-        contacts_dir = self._get_contacts_dir(username)
-        contact_key_path = os.path.join(contacts_dir, f"{contact_username}.pem")
+        contact_dir = self._get_contact_dir(username, contact_username)
+        contact_key_path = os.path.join(contact_dir, self.PUBLIC_KEY_FILE)
         
         if not os.path.exists(contact_key_path):
             return None
@@ -126,9 +139,62 @@ class KeyStore:
         Returns:
             bool: True if the contact's key exists
         """
-        contacts_dir = self._get_contacts_dir(username)
-        contact_key_path = os.path.join(contacts_dir, f"{contact_username}.pem")
+        contact_dir = self._get_contact_dir(username, contact_username)
+        contact_key_path = os.path.join(contact_dir, self.PUBLIC_KEY_FILE)
         return os.path.exists(contact_key_path)
+    
+    def save_symmetric_key(self, username: str, contact_username: str, symmetric_key: bytes):
+        """
+        Save a symmetric encryption key for a contact.
+        
+        Args:
+            username: The current user's username
+            contact_username: The contact's username
+            symmetric_key: The AES symmetric key (32 bytes)
+        """
+        if not symmetric_key or not username or not contact_username:
+            raise ValueError("Symmetric key, username, or contact_username not set.")
+        
+        contact_dir = self._get_contact_dir(username, contact_username)
+        symmetric_key_path = os.path.join(contact_dir, self.SYMMETRIC_KEY_FILE)
+        
+        with open(symmetric_key_path, "wb") as f:
+            f.write(symmetric_key)
+    
+    def load_symmetric_key(self, username: str, contact_username: str) -> bytes | None:
+        """
+        Load a symmetric encryption key for a contact if it exists.
+        
+        Args:
+            username: The current user's username
+            contact_username: The contact's username
+            
+        Returns:
+            bytes | None: The symmetric key or None if not found
+        """
+        contact_dir = self._get_contact_dir(username, contact_username)
+        symmetric_key_path = os.path.join(contact_dir, self.SYMMETRIC_KEY_FILE)
+        
+        if not os.path.exists(symmetric_key_path):
+            return None
+        
+        with open(symmetric_key_path, "rb") as f:
+            return f.read()
+    
+    def has_symmetric_key(self, username: str, contact_username: str) -> bool:
+        """
+        Check if a symmetric key is stored for a contact.
+        
+        Args:
+            username: The current user's username
+            contact_username: The contact's username
+            
+        Returns:
+            bool: True if the symmetric key exists
+        """
+        contact_dir = self._get_contact_dir(username, contact_username)
+        symmetric_key_path = os.path.join(contact_dir, self.SYMMETRIC_KEY_FILE)
+        return os.path.exists(symmetric_key_path)
 
 class PresenceWorker:
     """
@@ -326,7 +392,7 @@ class ChatClient:
         """
         Get or establish a symmetric key with a recipient.
         
-        Generates a random AES symmetric key for this recipient.
+        First checks keystore, then memory cache, then generates a new key.
         The key is encrypted with the recipient's RSA public key for secure transmission.
         
         Args:
@@ -335,15 +401,25 @@ class ChatClient:
         Returns:
             bytes: The 256-bit AES symmetric key for encrypting messages
         """
-        # Check if we already have a symmetric key for this recipient
+        # Check memory cache first
         if recipient_username in self.symmetric_keys:
             return self.symmetric_keys[recipient_username]
+        
+        # Check keystore
+        stored_key = self.keystore.load_symmetric_key(self.username, recipient_username)
+        if stored_key:
+            # Cache in memory for faster access
+            self.symmetric_keys[recipient_username] = stored_key
+            return stored_key
         
         # Generate a new random symmetric key (32 bytes = 256 bits)
         symmetric_key = get_random_bytes(32)
         
-        # Cache the symmetric key for this recipient
+        # Cache in memory
         self.symmetric_keys[recipient_username] = symmetric_key
+        
+        # Save to keystore
+        self.keystore.save_symmetric_key(self.username, recipient_username, symmetric_key)
         
         self._send_symmetric_key(recipient_username, symmetric_key)
         
