@@ -103,7 +103,26 @@ A secure command-line chat application using **public-key** and **symmetric-key 
 - `error` if user does not exist
 
 ---
+#### `POST /chat/{username}/keyexchange`
 
+**Exchange symmetric encryption key**
+
+**Parameters**
+
+- `encrypted_key` (symmetric key encrypted with recipient's RSA public key)
+
+**Behavior**
+
+- Allows sender to securely transmit a symmetric AES key to the recipient
+- The symmetric key is used for encrypting subsequent messages
+- Key is encrypted with the recipient's RSA public key to ensure confidentiality
+
+**Returns**
+
+- `OK`
+- `error` if recipient does not exist or encryption fails
+
+---
 ### Messaging
 
 #### `POST /chat/{username}`

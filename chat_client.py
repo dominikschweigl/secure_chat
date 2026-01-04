@@ -74,6 +74,7 @@ class ChatClient:
     USERS_ENDPOINT = "/chat/users"
     PUBLIC_KEY_ENDPOINT = "/chat/{username}/publickey"
     MESSAGE_ENDPOINT = "/chat/{username}"
+    KEY_EXCHANGE_ENDPOINT = "/chat/{username}/keyexchange"
 
     def __init__(self, server_address: str, keystore: KeyStore | None = None):
         self.server_address: str = server_address
@@ -254,8 +255,9 @@ class ChatClient:
         cipher_rsa = PKCS1_OAEP.new(recipient_rsa_key)
         encrypted_key = base64.b64encode(cipher_rsa.encrypt(symmetric_key)).decode('utf-8')
         
+        endpoint = self.KEY_EXCHANGE_ENDPOINT.format(username=recipient_username)
         response = requests.post(
-            f"{self.server_address}/chat/{recipient_username}/keyexchange",
+            f"{self.server_address}{endpoint}",
             data={'encrypted_key': encrypted_key}
         )
         response.raise_for_status()
