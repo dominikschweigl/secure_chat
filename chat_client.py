@@ -3,13 +3,17 @@ from Crypto.PublicKey import RSA
 from Crypto.Cipher import AES, PKCS1_OAEP
 from Crypto.Random import get_random_bytes
 from Crypto.Hash import SHA256, HMAC
-from Crypto.Util.Padding import pad
+from Crypto.Util.Padding import pad, unpad
 import base64
+import threading
 
 from key_store import KeyStore
 from presence_worker import PresenceWorker
 from message_store import MessageStore
+from message_worker import MessageWorker
 
+# TODO: Implement message receival
+# TODO: Implement session key management
 
 class ChatClient:
 
@@ -21,6 +25,7 @@ class ChatClient:
     PUBLIC_KEY_ENDPOINT = "/chat/{username}/publickey"
     MESSAGE_ENDPOINT = "/chat/{username}"
     KEY_EXCHANGE_ENDPOINT = "/chat/{username}/keyexchange"
+    MESSAGES_ENDPOINT = "/chat/messages"
 
     def __init__(self, server_address: str, keystore: KeyStore | None = None):
         self.server_address: str = server_address
@@ -31,8 +36,20 @@ class ChatClient:
         self.keystore = keystore or KeyStore()
         self.message_store = MessageStore()
         self.presence = PresenceWorker(server_address, self.PRESENCE_ENDPOINT)
+        self.message_worker = MessageWorker(server_address, self.MESSAGES_ENDPOINT)
         # Cache for established symmetric keys
         self.symmetric_keys: dict[str, bytes] = {}
+        
+        # Thread locks for thread safety
+        self._state_lock = threading.RLock()  # Protects login state (username, logged_in, session_key)
+        self._keys_lock = threading.RLock()   # Protects symmetric_keys dict
+        
+        # Event callbacks for reactive UI
+        self.on_message_received = None  # Callback(sender: str, message: str, timestamp: str)
+        self.on_message_sent = None      # Callback(recipient: str, message: str)
+        self.on_login = None             # Callback(username: str)
+        self.on_logout = None            # Callback()
+        self.on_error = None             # Callback(error: str)
 
     def register(self, username: str, password: str):
         """
@@ -72,15 +89,23 @@ class ChatClient:
 
         session_key = response.json().get('session-key')
 
-        self.username = username
-        self.session_key = session_key
-        self.logged_in = True
+        with self._state_lock:
+            self.username = username
+            self.session_key = session_key
+            self.logged_in = True
 
         # load private key for this user
         self.rsa_key = self.keystore.load_own_key(username)
 
         # start presence heartbeats
         self.presence.start(session_key)
+        
+        # start message polling
+        self.message_worker.start(session_key, self._process_messages)
+        
+        # Trigger login callback
+        if self.on_login:
+            self.on_login(username)
 
     def logout(self):
         """
@@ -102,11 +127,19 @@ class ChatClient:
 
         # stop presence heartbeats
         self.presence.stop()
+        
+        # stop message polling
+        self.message_worker.stop()
 
-        self.username = None
-        self.logged_in = False
-        self.session_key = None
-        self.rsa_key = None
+        with self._state_lock:
+            self.username = None
+            self.logged_in = False
+            self.session_key = None
+            self.rsa_key = None
+        
+        # Trigger logout callback
+        if self.on_logout:
+            self.on_logout()
 
     def get_users(self):
         """
@@ -173,6 +206,10 @@ class ChatClient:
             message=message,
             encrypted=False
         )
+        
+        # Trigger message sent callback
+        if self.on_message_sent:
+            self.on_message_sent(recipient_username, message)
 
 
     def _get_or_establish_symmetric_key(self, recipient_username: str) -> bytes:
@@ -188,29 +225,33 @@ class ChatClient:
         Returns:
             bytes: The 256-bit AES symmetric key for encrypting messages
         """
-        # Check memory cache first
-        if recipient_username in self.symmetric_keys:
-            return self.symmetric_keys[recipient_username]
-        
-        # Check keystore
-        stored_key = self.keystore.load_symmetric_key(self.username, recipient_username)
-        if stored_key:
-            # Cache in memory for faster access
-            self.symmetric_keys[recipient_username] = stored_key
-            return stored_key
-        
-        # Generate a new random symmetric key (32 bytes = 256 bits)
-        symmetric_key = get_random_bytes(32)
-        
-        # Cache in memory
-        self.symmetric_keys[recipient_username] = symmetric_key
-        
-        # Save to keystore
-        self.keystore.save_symmetric_key(self.username, recipient_username, symmetric_key)
-        
-        self._send_symmetric_key(recipient_username, symmetric_key)
-        
-        return symmetric_key
+        with self._keys_lock:
+            # Check memory cache first
+            if recipient_username in self.symmetric_keys:
+                return self.symmetric_keys[recipient_username]
+            
+            # Check keystore
+            with self._state_lock:
+                current_username = self.username
+            
+            stored_key = self.keystore.load_symmetric_key(current_username, recipient_username)
+            if stored_key:
+                # Cache in memory for faster access
+                self.symmetric_keys[recipient_username] = stored_key
+                return stored_key
+            
+            # Generate a new random symmetric key (32 bytes = 256 bits)
+            symmetric_key = get_random_bytes(32)
+            
+            # Cache in memory
+            self.symmetric_keys[recipient_username] = symmetric_key
+            
+            # Save to keystore
+            self.keystore.save_symmetric_key(current_username, recipient_username, symmetric_key)
+            
+            self._send_symmetric_key(recipient_username, symmetric_key)
+            
+            return symmetric_key
 
     
     def _send_symmetric_key(self, recipient_username: str, symmetric_key: bytes):
@@ -295,6 +336,88 @@ class ChatClient:
         # Combine IV, ciphertext, and HMAC tag, then base64 encode
         encrypted_data = iv + ciphertext + tag
         return base64.b64encode(encrypted_data).decode('utf-8')
+    
+    def _decrypt_message(self, encrypted_message: str, symmetric_key: bytes) -> str:
+        """
+        Decrypt a message using AES-CBC and verify HMAC authentication.
+        
+        Args:
+            encrypted_message: Base64-encoded encrypted message with IV and HMAC
+            symmetric_key: The AES symmetric key (32 bytes)
+            
+        Returns:
+            str: The decrypted plaintext message
+            
+        Raises:
+            ValueError: If HMAC verification fails
+        """
+        # Decode from base64
+        encrypted_data = base64.b64decode(encrypted_message)
+        
+        # Extract components: IV (16 bytes) + ciphertext + HMAC (32 bytes)
+        iv = encrypted_data[:16]
+        hmac_tag = encrypted_data[-32:]
+        ciphertext = encrypted_data[16:-32]
+        
+        # Verify HMAC
+        hmac = HMAC.new(symmetric_key, digestmod=SHA256)
+        hmac.update(iv + ciphertext)
+        hmac.verify(hmac_tag)
+        
+        # Decrypt
+        cipher = AES.new(symmetric_key, AES.MODE_CBC, iv)
+        padded_plaintext = cipher.decrypt(ciphertext)
+        plaintext = unpad(padded_plaintext, AES.block_size)
+        
+        return plaintext.decode('utf-8')
+    
+    def _process_messages(self, messages):
+        """
+        Process fetched messages: decrypt and store in MessageStore.
+        Called as a callback by MessageWorker.
+        
+        Args:
+            messages: List of message objects from the server
+        """
+        with self._state_lock:
+            if not self.logged_in:
+                return
+            current_username = self.username
+        
+        for msg in messages:
+            sender = msg.get('sender')
+            encrypted_content = msg.get('message')
+            timestamp = msg.get('timestamp')
+            
+            if not sender or not encrypted_content:
+                continue
+            
+            # Get or establish symmetric key with sender
+            try:
+                symmetric_key = self._get_or_establish_symmetric_key(sender)
+            except Exception:
+                continue
+            
+            # Decrypt the message
+            try:
+                plaintext = self._decrypt_message(encrypted_content, symmetric_key)
+            except Exception:
+                print("Failed to decrypt message from", sender)
+                continue
+            
+            # Store in MessageStore
+            self.message_store.save_message(
+                username=current_username,
+                contact_username=sender,
+                sender=sender,
+                recipient=current_username,
+                message=plaintext,
+                encrypted=False
+            )
+            
+            # Trigger message received callback
+            if self.on_message_received:
+                self.on_message_received(sender, plaintext, timestamp)
     
     def is_logged_in(self) -> bool:
         return self.logged_in
