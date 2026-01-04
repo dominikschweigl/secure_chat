@@ -8,6 +8,7 @@ import base64
 
 from key_store import KeyStore
 from presence_worker import PresenceWorker
+from message_store import MessageStore
 
 
 class ChatClient:
@@ -28,6 +29,7 @@ class ChatClient:
         self.session_key: str = None
         self.rsa_key: RSA.RsaKey = None
         self.keystore = keystore or KeyStore()
+        self.message_store = MessageStore()
         self.presence = PresenceWorker(server_address, self.PRESENCE_ENDPOINT)
         # Cache for established symmetric keys
         self.symmetric_keys: dict[str, bytes] = {}
@@ -163,6 +165,14 @@ class ChatClient:
         )
 
         response.raise_for_status()
+
+        self.message_store.save_message(
+            self.username, recipient_username,
+            sender=self.username,
+            recipient=recipient_username,
+            message=message,
+            encrypted=False
+        )
 
 
     def _get_or_establish_symmetric_key(self, recipient_username: str) -> bytes:
