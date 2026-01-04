@@ -9,24 +9,126 @@ import threading
 import base64
 
 class KeyStore:
+    """
+    Manages storage of RSA keys for the user and their contacts.
+    
+    Directory structure:
+    keys/
+      {username}/
+        private.pem      # User's own private key
+        public.pem       # User's own public key
+        contacts/
+          {recipient_name}.pem  # Public keys of other users
+    """
     def __init__(self, directory: str = "keys"):
         self.directory = directory
         os.makedirs(self.directory, exist_ok=True)
 
-    def save_rsa_key(self, username: str, rsa_key: RSA.RsaKey):
+    def _get_user_dir(self, username: str) -> str:
+        """Get the directory path for a specific user."""
+        user_dir = os.path.join(self.directory, username)
+        os.makedirs(user_dir, exist_ok=True)
+        return user_dir
+    
+    def _get_contacts_dir(self, username: str) -> str:
+        """Get the contacts directory path for a specific user."""
+        contacts_dir = os.path.join(self._get_user_dir(username), "contacts")
+        os.makedirs(contacts_dir, exist_ok=True)
+        return contacts_dir
+
+    def save_own_key(self, username: str, rsa_key: RSA.RsaKey):
+        """
+        Save the user's own RSA private key.
+        
+        Args:
+            username: The username
+            rsa_key: The RSA private key to save
+        """
         if not rsa_key or not username:
             raise ValueError("RSA key or username not set.")
         
-        key_path = os.path.join(self.directory, f"{username}_private.pem")
-        with open(key_path, "w") as f:
+        user_dir = self._get_user_dir(username)
+        private_key_path = os.path.join(user_dir, "private.pem")
+        
+        with open(private_key_path, "w") as f:
             f.write(rsa_key.export_key().decode("utf-8"))
+        
+        # Also save public key for convenience
+        public_key_path = os.path.join(user_dir, "public.pem")
+        with open(public_key_path, "w") as f:
+            f.write(rsa_key.publickey().export_key().decode("utf-8"))
 
-    def load_rsa_key(self, username: str) -> RSA.RsaKey:
-        key_path = os.path.join(self.directory, f"{username}_private.pem")
-        if not os.path.exists(key_path):
-            raise FileNotFoundError(f"No RSA key found for user {username}")
-        with open(key_path, "r") as f:
+    def load_own_key(self, username: str) -> RSA.RsaKey:
+        """
+        Load the user's own RSA private key.
+        
+        Args:
+            username: The username
+            
+        Returns:
+            RSA.RsaKey: The private key
+        """
+        user_dir = self._get_user_dir(username)
+        private_key_path = os.path.join(user_dir, "private.pem")
+        
+        if not os.path.exists(private_key_path):
+            raise FileNotFoundError(f"No private key found for user {username}")
+        
+        with open(private_key_path, "r") as f:
             return RSA.import_key(f.read())
+
+    def save_contact_key(self, username: str, contact_username: str, public_key: RSA.RsaKey):
+        """
+        Save a contact's public key.
+        
+        Args:
+            username: The current user's username
+            contact_username: The contact's username
+            public_key: The contact's RSA public key
+        """
+        if not public_key or not username or not contact_username:
+            raise ValueError("Public key, username, or contact_username not set.")
+        
+        contacts_dir = self._get_contacts_dir(username)
+        contact_key_path = os.path.join(contacts_dir, f"{contact_username}.pem")
+        
+        with open(contact_key_path, "w") as f:
+            f.write(public_key.export_key().decode("utf-8"))
+
+    def load_contact_key(self, username: str, contact_username: str) -> RSA.RsaKey | None:
+        """
+        Load a contact's public key if it exists.
+        
+        Args:
+            username: The current user's username
+            contact_username: The contact's username
+            
+        Returns:
+            RSA.RsaKey | None: The contact's public key or None if not found
+        """
+        contacts_dir = self._get_contacts_dir(username)
+        contact_key_path = os.path.join(contacts_dir, f"{contact_username}.pem")
+        
+        if not os.path.exists(contact_key_path):
+            return None
+        
+        with open(contact_key_path, "r") as f:
+            return RSA.import_key(f.read())
+    
+    def has_contact_key(self, username: str, contact_username: str) -> bool:
+        """
+        Check if a contact's public key is stored.
+        
+        Args:
+            username: The current user's username
+            contact_username: The contact's username
+            
+        Returns:
+            bool: True if the contact's key exists
+        """
+        contacts_dir = self._get_contacts_dir(username)
+        contact_key_path = os.path.join(contacts_dir, f"{contact_username}.pem")
+        return os.path.exists(contact_key_path)
 
 class PresenceWorker:
     """
@@ -84,9 +186,7 @@ class ChatClient:
         self.rsa_key: RSA.RsaKey = None
         self.keystore = keystore or KeyStore()
         self.presence = PresenceWorker(server_address, self.PRESENCE_ENDPOINT)
-        # Cache for recipient public keys to avoid repeated fetches
-        self.recipient_public_keys: dict[str, RSA.RsaKey] = {}
-        # Cache for established symmetric keys (DH key exchange results)
+        # Cache for established symmetric keys
         self.symmetric_keys: dict[str, bytes] = {}
 
     def register(self, username: str, password: str):
@@ -109,7 +209,7 @@ class ChatClient:
 
         self.username = username
         self.rsa_key = rsa_key
-        self.keystore.save_rsa_key(username, rsa_key)
+        self.keystore.save_own_key(username, rsa_key)
 
     def login(self, username: str, password: str):
         """
@@ -132,7 +232,7 @@ class ChatClient:
         self.logged_in = True
 
         # load private key for this user
-        self.rsa_key = self.keystore.load_rsa_key(username)
+        self.rsa_key = self.keystore.load_own_key(username)
 
         # start presence heartbeats
         self.presence.start(session_key)
@@ -266,6 +366,7 @@ class ChatClient:
     def _get_public_key(self, username: str):
         """
         Get the public key for a target user to initialize chat.
+        First checks local keystore, then fetches from server if not cached.
         
         Args:
             username: The username of the target user
@@ -278,6 +379,12 @@ class ChatClient:
             requests.exceptions.HTTPError: If the request fails
             requests.exceptions.RequestException: If the request fails
         """
+        # Check if we have the contact's key stored locally
+        cached_key = self.keystore.load_contact_key(self.username, username)
+        if cached_key:
+            return cached_key
+        
+        # Fetch from server
         endpoint = self.PUBLIC_KEY_ENDPOINT.format(username=username)
         response = requests.get(
             f"{self.server_address}{endpoint}"
@@ -290,7 +397,12 @@ class ChatClient:
         if not public_key_str:
             raise RuntimeError("No public key returned from server")
         
-        return RSA.import_key(public_key_str)
+        public_key = RSA.import_key(public_key_str)
+        
+        # Cache the key locally
+        self.keystore.save_contact_key(self.username, username, public_key)
+        
+        return public_key
 
 
     def _encrypt_message(self, message: str, symmetric_key: bytes) -> str:
