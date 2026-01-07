@@ -12,7 +12,6 @@ from presence_worker import PresenceWorker
 from message_store import MessageStore
 from message_worker import MessageWorker
 
-# TODO: Implement message receival
 # TODO: Implement session key management
 
 class ChatClient:
@@ -26,6 +25,7 @@ class ChatClient:
     MESSAGE_ENDPOINT = "/chat/{username}"
     KEY_EXCHANGE_ENDPOINT = "/chat/{username}/keyexchange"
     MESSAGES_ENDPOINT = "/chat/messages"
+    KEY_EXCHANGES_ENDPOINT = "/chat/keyexchanges"
 
     def __init__(self, server_address: str, keystore: KeyStore | None = None):
         self.server_address: str = server_address
@@ -212,11 +212,50 @@ class ChatClient:
             self.on_message_sent(recipient_username, message)
 
 
+    def _get_symmetric_key(self, contact_username: str) -> bytes | None:
+        """
+        Get an existing symmetric key with a contact.
+        Does NOT establish a new key if one doesn't exist.
+        
+        If the key is not found locally, checks Kafka for any received key exchange messages
+        and stores all received keys before returning the requested key.
+        
+        Args:
+            contact_username: The contact's username
+            
+        Returns:
+            bytes | None: The symmetric key if it exists, None otherwise
+        """
+        with self._keys_lock:
+            # Check memory cache first
+            if contact_username in self.symmetric_keys:
+                return self.symmetric_keys[contact_username]
+            
+            # Check keystore
+            with self._state_lock:
+                current_username = self.username
+            
+            stored_key = self.keystore.load_symmetric_key(current_username, contact_username)
+            if stored_key:
+                # Cache in memory for faster access
+                self.symmetric_keys[contact_username] = stored_key
+                return stored_key
+        
+        # Not found locally - check Kafka for received key exchanges
+        self._fetch_and_process_key_exchanges()
+        
+        # Check again after processing Kafka messages
+        with self._keys_lock:
+            if contact_username in self.symmetric_keys:
+                return self.symmetric_keys[contact_username]
+            
+            return None
+
     def _get_or_establish_symmetric_key(self, recipient_username: str) -> bytes:
         """
         Get or establish a symmetric key with a recipient.
         
-        First checks keystore, then memory cache, then generates a new key.
+        First checks for existing key, then generates a new one if needed.
         The key is encrypted with the recipient's RSA public key for secure transmission.
         
         Args:
@@ -225,20 +264,15 @@ class ChatClient:
         Returns:
             bytes: The 256-bit AES symmetric key for encrypting messages
         """
+        # Try to get existing key first
+        existing_key = self._get_symmetric_key(recipient_username)
+        if existing_key:
+            return existing_key
+        
+        # No existing key, establish a new one
         with self._keys_lock:
-            # Check memory cache first
-            if recipient_username in self.symmetric_keys:
-                return self.symmetric_keys[recipient_username]
-            
-            # Check keystore
             with self._state_lock:
                 current_username = self.username
-            
-            stored_key = self.keystore.load_symmetric_key(current_username, recipient_username)
-            if stored_key:
-                # Cache in memory for faster access
-                self.symmetric_keys[recipient_username] = stored_key
-                return stored_key
             
             # Generate a new random symmetric key (32 bytes = 256 bits)
             symmetric_key = get_random_bytes(32)
@@ -266,6 +300,46 @@ class ChatClient:
         )
         response.raise_for_status()
     
+    def _fetch_and_process_key_exchanges(self) -> None:
+        """
+        Fetch key exchange messages from the dedicated Kafka queue and decrypt/store all received symmetric keys.
+        This is called when looking for a key that doesn't exist locally.
+        """
+        if not self.is_logged_in():
+            return
+        
+        try:
+            # Fetch key exchange messages from the dedicated queue
+            response = requests.get(
+                f"{self.server_address}{self.KEY_EXCHANGES_ENDPOINT}"
+            )
+            response.raise_for_status()
+            key_exchanges = response.json().get('keys', [])
+            
+            # Process all received key exchange messages
+            for key_msg in key_exchanges:
+                sender = key_msg.get('sender')
+                encrypted_key = key_msg.get('encrypted_key')
+                
+                if sender and encrypted_key:
+                    try:
+                        # Decrypt the symmetric key using our RSA private key
+                        cipher_rsa = PKCS1_OAEP.new(self.rsa_key)
+                        encrypted_key_bytes = base64.b64decode(encrypted_key)
+                        symmetric_key = cipher_rsa.decrypt(encrypted_key_bytes)
+                        
+                        # Store the key
+                        with self._keys_lock:
+                            self.symmetric_keys[sender] = symmetric_key
+                            with self._state_lock:
+                                current_username = self.username
+                            self.keystore.save_symmetric_key(current_username, sender, symmetric_key)
+                        
+                        print(f"Received and stored symmetric key from {sender}")
+                    except Exception as e:
+                        print(f"Failed to decrypt key from {sender}: {e}")
+        except Exception as e:
+            print(f"Failed to fetch key exchanges: {e}")
 
     def _get_public_key(self, username: str):
         """
@@ -392,10 +466,11 @@ class ChatClient:
             if not sender or not encrypted_content:
                 continue
             
-            # Get or establish symmetric key with sender
-            try:
-                symmetric_key = self._get_or_establish_symmetric_key(sender)
-            except Exception:
+            # Get existing symmetric key with sender (don't establish new)
+            symmetric_key = self._get_symmetric_key(sender)
+            if not symmetric_key:
+                # No key exists - skip this message (sender should have sent key first)
+                print(f"No symmetric key found for {sender}, skipping message")
                 continue
             
             # Decrypt the message
