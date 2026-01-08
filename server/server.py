@@ -60,6 +60,9 @@ class MessageSend(BaseModel):
 class KeyExchange(BaseModel):
     encrypted_key: str
 
+class PresenceUpdate(BaseModel):
+    online: bool
+
 app = FastAPI(title="Secure E2EE Chat Server")
 producer: Optional[AIOKafkaProducer] = None
 
@@ -131,6 +134,16 @@ def login(user_data: UserLogin, db: Session = Depends(get_db)):
     cipher_rsa = PKCS1_OAEP.new(recipient_key, hashAlgo=SHA256)
     return {"session-key": cipher_rsa.encrypt(raw_key.encode()).hex()}
 
+@app.post("/chat/auth/logout") 
+def logout(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    current_user.session_key_hash = None
+    current_user.is_online = False
+    db.commit()
+    return {"status": "OK"}
+
 @app.get("/chat/messages")
 async def get_messages(current_user: User = Depends(get_current_user)):
     topic = f"user_queue_{current_user.username}"
@@ -168,13 +181,17 @@ async def send_message(username: str, data: MessageSend, current_user: User = De
     await producer.send_and_wait(topic, json.dumps(payload).encode())
     return {"status": "OK"}
 
-@app.post("/chat/auth/logout") 
-def logout(
+@app.post("/chat/presence/{username}")
+def update_presence(
+    username: str,
+    data: PresenceUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    current_user.session_key_hash = None
-    current_user.is_online = False
+    if username != current_user.username:
+        raise HTTPException(status_code=403, detail="Cannot update other user's presence")
+
+    current_user.is_online = data.online
     db.commit()
     return {"status": "OK"}
 
@@ -194,3 +211,17 @@ async def key_exchange(username: str, data: KeyExchange, current_user: User = De
     }
     await producer.send_and_wait(topic, json.dumps(payload).encode())
     return {"status": "OK"}
+
+@app.get("/chat/{username}/publickey")
+def get_public_key(
+    username: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return {
+        "public_key": user.public_key
+    }
