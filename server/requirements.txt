@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+sqlalchemy
+pycryptodome
+passlib[bcrypt]
+bcrypt==4.0.1
+aiokafka
+kafka-python
+python-multipart
+python-jose[cryptography]

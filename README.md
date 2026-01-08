@@ -12,7 +12,7 @@ A secure command-line chat application using **public-key** and **symmetric-key 
 
 ### Authentication
 
-#### `POST /chat/register`
+#### `POST /chat/auth/register`
 
 **Register a new user**
 
@@ -29,7 +29,7 @@ A secure command-line chat application using **public-key** and **symmetric-key 
 
 ---
 
-#### `POST /chat/login`
+#### `POST /chat/auth/login`
 
 **Log in an existing user**
 
@@ -53,7 +53,7 @@ A secure command-line chat application using **public-key** and **symmetric-key 
 
 ### Session Management
 
-#### `POST /chat/logout`
+#### `POST /chat/auth/logout`
 
 **Log out the user**
 
@@ -124,6 +124,25 @@ A secure command-line chat application using **public-key** and **symmetric-key 
 
 ---
 ### Messaging
+
+#### `GET /chat/messages`
+
+**Retrieve messages from the user's queue**
+
+- Connects to the user's dedicated Kafka topic (`user_queue_{username}`)
+- Fetches all messages from the earliest available offset
+- Retrieves both standard chat messages and system events
+
+**Message Schema**
+- `type`: Message category (e.g., `CHAT_MESSAGE`, `KEY_EXCHANGE`)
+- `sender`: Username of the sender
+- `message`: The encrypted payload
+- `timestamp`: ISO-8601 formatted transmission time
+
+**Returns**
+- `messages`: An array of message objects
+
+---
 
 #### `POST /chat/{username}`
 
