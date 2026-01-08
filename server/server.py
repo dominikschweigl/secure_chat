@@ -68,46 +68,105 @@ producer: Optional[AIOKafkaProducer] = None
 
 @app.on_event("startup")
 async def startup_event():
+    """
+    FastAPI startup event.
+    
+    Initializes the global Kafka producer. Waits 2 seconds to allow Kafka service to start.
+    """
     global producer
     await asyncio.sleep(2)
     producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
     await producer.start()
 
+
 @app.on_event("shutdown")
 async def shutdown_event():
-    if producer: await producer.stop()
+    """
+    FastAPI shutdown event.
+
+    Stops the global Kafka producer cleanly to release resources.
+    """
+    if producer:
+        await producer.stop()
+
 
 def get_db():
+    """
+    Provides a SQLAlchemy database session for dependency injection.
+
+    Yields:
+        Session: SQLAlchemy session object.
+    """
     db = SessionLocal()
-    try: yield db
-    finally: db.close()
+    try:
+        yield db
+    finally:
+        db.close()
+
 
 async def get_current_user(
     x_session_key: Optional[str] = Header(None, alias="X-Session-Key"), 
     db: Session = Depends(get_db)
 ):
+    """
+    Dependency to authenticate the user via session key.
+
+    Args:
+        x_session_key (str): Session key sent in request header.
+        db (Session): Database session.
+
+    Returns:
+        User: Authenticated user.
+
+    Raises:
+        HTTPException 401: If session key is missing or invalid.
+    """
     if not x_session_key:
-         raise HTTPException(status_code=401, detail="Session key missing")
+        raise HTTPException(status_code=401, detail="Session key missing")
 
     incoming_key_hash = hashlib.sha256(x_session_key.encode()).hexdigest()
     user = db.query(User).filter(User.session_key_hash == incoming_key_hash).first()
-
     if not user:
         raise HTTPException(status_code=401, detail="Invalid session")
-        
     return user
 
+
 def ensure_kafka_topic(username: str):
+    """
+    Ensures a Kafka topic exists for a user.
+
+    Args:
+        username (str): The username to create a topic for.
+
+    Notes:
+        Silently ignores errors if the topic already exists.
+    """
     try:
         admin_client = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS, client_id='admin')
         topic_name = f"user_queue_{username}"
         admin_client.create_topics([NewTopic(name=topic_name, num_partitions=1, replication_factor=1)])
         admin_client.close()
-    except TopicAlreadyExistsError: pass
-    except Exception: pass
+    except TopicAlreadyExistsError:
+        pass
+    except Exception:
+        pass
+
 
 @app.post("/chat/auth/register")
 def register(user_data: UserRegister, db: Session = Depends(get_db)):
+    """
+    Registers a new user.
+
+    Args:
+        user_data (UserRegister): Username, password, and public key.
+        db (Session): Database session.
+
+    Returns:
+        dict: {"status": "success"} on success.
+
+    Raises:
+        HTTPException 400: If username is already taken.
+    """
     if db.query(User).filter(User.username == user_data.username).first():
         raise HTTPException(status_code=400, detail="Username taken")
     new_user = User(
@@ -120,8 +179,25 @@ def register(user_data: UserRegister, db: Session = Depends(get_db)):
     ensure_kafka_topic(user_data.username)
     return {"status": "success"}
 
+
 @app.post("/chat/auth/login")
 def login(user_data: UserLogin, db: Session = Depends(get_db)):
+    """
+    Authenticates a user and generates a session key.
+
+    Args:
+        user_data (UserLogin): Username and password.
+        db (Session): Database session.
+
+    Returns:
+        dict: {"session-key": <RSA-encrypted session key>}
+
+    Notes:
+        The session key must be used in the X-Session-Key header for future requests.
+
+    Raises:
+        HTTPException 401: If credentials are invalid.
+    """
     user = db.query(User).filter(User.username == user_data.username).first()
     if not user or not pwd_context.verify(user_data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -134,18 +210,38 @@ def login(user_data: UserLogin, db: Session = Depends(get_db)):
     cipher_rsa = PKCS1_OAEP.new(recipient_key, hashAlgo=SHA256)
     return {"session-key": cipher_rsa.encrypt(raw_key.encode()).hex()}
 
+
 @app.post("/chat/auth/logout") 
-def logout(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def logout(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """
+    Logs out the current user.
+
+    Clears the session key and sets the user offline.
+
+    Args:
+        db (Session): Database session.
+        current_user (User): Authenticated user.
+
+    Returns:
+        dict: {"status": "OK"}
+    """
     current_user.session_key_hash = None
     current_user.is_online = False
     db.commit()
     return {"status": "OK"}
 
+
 @app.get("/chat/messages")
 async def get_messages(current_user: User = Depends(get_current_user)):
+    """
+    Retrieves all messages for the authenticated user from Kafka.
+
+    Args:
+        current_user (User): Authenticated user.
+
+    Returns:
+        dict: {"messages": [<list_of_messages>]}
+    """
     topic = f"user_queue_{current_user.username}"
     consumer = AIOKafkaConsumer(
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
@@ -158,7 +254,6 @@ async def get_messages(current_user: User = Depends(get_current_user)):
         tp = TopicPartition(topic, 0)
         consumer.assign([tp])
         await consumer.seek_to_beginning(tp)
-        
         data = await consumer.getmany(timeout_ms=1000)
         for tp_key, msgs in data.items():
             for msg in msgs:
@@ -169,8 +264,20 @@ async def get_messages(current_user: User = Depends(get_current_user)):
         await consumer.stop()
     return {"messages": messages}
 
+
 @app.post("/chat/{username}")
 async def send_message(username: str, data: MessageSend, current_user: User = Depends(get_current_user)):
+    """
+    Sends a chat message to a specific user.
+
+    Args:
+        username (str): Recipient username.
+        data (MessageSend): Message content.
+        current_user (User): Authenticated sender.
+
+    Returns:
+        dict: {"status": "OK"}
+    """
     topic = f"user_queue_{username}"
     payload = {
         "type": "CHAT_MESSAGE",
@@ -181,6 +288,7 @@ async def send_message(username: str, data: MessageSend, current_user: User = De
     await producer.send_and_wait(topic, json.dumps(payload).encode())
     return {"status": "OK"}
 
+
 @app.post("/chat/presence/{username}")
 def update_presence(
     username: str,
@@ -188,20 +296,57 @@ def update_presence(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Updates the online/offline presence of the authenticated user.
+
+    Args:
+        username (str): Must match current user.
+        data (PresenceUpdate): {"online": bool}.
+        db (Session): Database session.
+        current_user (User): Authenticated user.
+
+    Returns:
+        dict: {"status": "OK"}
+
+    Raises:
+        HTTPException 403: If attempting to update another user's presence.
+    """
     if username != current_user.username:
         raise HTTPException(status_code=403, detail="Cannot update other user's presence")
-
     current_user.is_online = data.online
     db.commit()
     return {"status": "OK"}
 
+
 @app.get("/chat/users")
 def list_users(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """
+    Lists all registered users and their online status.
+
+    Args:
+        db (Session): Database session.
+        current_user (User): Authenticated user.
+
+    Returns:
+        list: [{"username": str, "online": bool}]
+    """
     users = db.query(User).all()
     return [{"username": u.username, "online": u.is_online} for u in users]
 
+
 @app.post("/chat/{username}/keyexchange")
 async def key_exchange(username: str, data: KeyExchange, current_user: User = Depends(get_current_user)):
+    """
+    Sends an encrypted key to another user for E2EE.
+
+    Args:
+        username (str): Recipient username.
+        data (KeyExchange): {"encrypted_key": str}.
+        current_user (User): Authenticated sender.
+
+    Returns:
+        dict: {"status": "OK"}
+    """
     topic = f"user_queue_{username}"
     payload = {
         "type": "KEY_EXCHANGE",
@@ -212,16 +357,24 @@ async def key_exchange(username: str, data: KeyExchange, current_user: User = De
     await producer.send_and_wait(topic, json.dumps(payload).encode())
     return {"status": "OK"}
 
+
 @app.get("/chat/{username}/publickey")
-def get_public_key(
-    username: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def get_public_key(username: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """
+    Retrieves the public key of a target user for E2EE initialization.
+
+    Args:
+        username (str): Target username.
+        db (Session): Database session.
+        current_user (User): Authenticated requester.
+
+    Returns:
+        dict: {"public_key": str}
+
+    Raises:
+        HTTPException 404: If the target user does not exist.
+    """
     user = db.query(User).filter(User.username == username).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-
-    return {
-        "public_key": user.public_key
-    }
+    return {"public_key": user.public_key}
