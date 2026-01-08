@@ -16,9 +16,9 @@ from message_worker import MessageWorker
 
 class ChatClient:
 
-    REGISTER_ENDPOINT = "/chat/register"
-    LOGIN_ENDPOINT = "/chat/login"
-    LOGOUT_ENDPOINT = "/chat/logout"
+    REGISTER_ENDPOINT = "/chat/auth/register"
+    LOGIN_ENDPOINT = "/chat/auth/login"
+    LOGOUT_ENDPOINT = "/chat/auth/logout"
     PRESENCE_ENDPOINT = "/chat/presence"
     USERS_ENDPOINT = "/chat/users"
     PUBLIC_KEY_ENDPOINT = "/chat/{username}/publickey"
