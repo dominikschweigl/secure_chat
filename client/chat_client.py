@@ -7,10 +7,10 @@ from Crypto.Util.Padding import pad, unpad
 import base64
 import threading
 
-from key_store import KeyStore
-from presence_worker import PresenceWorker
-from message_store import MessageStore
-from message_worker import MessageWorker
+from .key_store import KeyStore
+from .presence_worker import PresenceWorker
+from .message_store import MessageStore
+from .message_worker import MessageWorker
 
 # TODO: Implement session key management
 
@@ -65,7 +65,7 @@ class ChatClient:
         
         response = requests.post(
             f"{self.server_address}{self.REGISTER_ENDPOINT}", 
-            data={'username': username, 'password': password, 'public-key': public_key}
+            json={'username': username, 'password': password, 'public-key': public_key}
         )
         response.raise_for_status()
 
@@ -83,7 +83,7 @@ class ChatClient:
         """
         response = requests.post(
             f"{self.server_address}{self.LOGIN_ENDPOINT}", 
-            data={'username': username, 'password': password}
+            json={'username': username, 'password': password}
         )
         response.raise_for_status()
 

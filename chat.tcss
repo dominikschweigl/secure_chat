@@ -1,0 +1,95 @@
+/* General Layout */
+Screen {
+    background: $surface;
+}
+
+#main-container {
+    height: 100%;
+}
+
+/* Sidebar Styles */
+#sidebar {
+    width: 30;
+    background: $panel;
+    border-right: tall $primary;
+}
+
+#sidebar-title {
+    padding: 1;
+    background: $primary;
+    color: white;
+    text-style: bold;
+}
+
+/* Chat Area Styles */
+#chat-area {
+    width: 1fr;
+}
+
+#chat-header {
+    padding: 1;
+    background: $boost;
+    border-bottom: solid $primary;
+}
+
+#message-list {
+    height: 1fr;
+    padding: 1;
+    overflow-y: scroll;
+}
+
+/* Message Bubble Styles */
+.message {
+    margin: 1 0;
+    padding: 0 1;
+    background: $boost;
+    border-left: solid $secondary;
+    width: auto;
+    max-width: 80%;
+}
+
+.self-sent {
+    border-left: none;
+    border-right: solid $accent;
+    background: $primary-darken-2;
+    margin-left: 15; 
+    text-align: right;
+}
+
+#chat-input {
+    dock: bottom;
+    margin: 1;
+}
+
+/* Login Screen Styles */
+#login-form {
+    width: 45;
+    height: auto;
+    border: double $primary;
+    padding: 1 2;
+    background: $surface;
+}
+
+#login-title {
+    width: 100%;
+    text-align: center;
+    color: $accent;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+/* Reset docking for inputs inside the login form */
+#login-form Input {
+    dock: none;
+    margin: 1 0;
+}
+
+#login-buttons {
+    margin-top: 1;
+    height: 3;
+    align: center middle;
+}
+
+#login-buttons Button {
+    margin: 0 1;
+}

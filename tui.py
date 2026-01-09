@@ -1,0 +1,159 @@
+from textual.app import App, ComposeResult
+from textual.containers import Horizontal, Vertical, ScrollableContainer, Center, Middle
+from textual.widgets import Header, Footer, Input, ListItem, ListView, Static, Label, Button
+from textual.screen import Screen
+from textual.binding import Binding
+# Importing the ChatClient for backend communication
+from client.chat_client import ChatClient
+
+class Message(Static):
+    """Widget to display a single chat message."""
+    def __init__(self, sender: str, text: str, self_sent: bool = False):
+        super().__init__(text)
+        self.sender = sender
+        self.self_sent = self_sent
+        self.add_class("message")
+        if self_sent:
+            self.add_class("self-sent")
+
+class LoginScreen(Screen):
+    """The initial login screen of the application."""
+    def compose(self) -> ComposeResult:
+        with Center():
+            with Middle():
+                with Vertical(id="login-form"):
+                    yield Label("SECURE E2EE CHAT", id="login-title")
+                    yield Input(placeholder="Username", id="username") 
+                    yield Input(placeholder="Password", password=True, id="password")
+                    with Horizontal(id="login-buttons"):
+                        yield Button("Register", id="register-btn")
+                        yield Button("Login", variant="primary", id="login-btn")
+        yield Footer()
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle login and registration button clicks."""
+        username = self.query_one("#username").value
+        password = self.query_one("#password").value
+
+        if not username or not password:
+            self.app.notify("Please enter credentials", severity="warning")
+            return
+
+        try:
+            if event.button.id == "login-btn":
+                # Authenticate with the backend server
+                self.app.client.login(username, password)
+                # Set the callback to handle incoming messages from Kafka
+                self.app.client.on_message_received = self.app.handle_new_message
+                # Transition to the main chat interface
+                self.app.push_screen(MainScreen())
+                self.app.notify(f"Logged in as {username}")
+            
+            elif event.button.id == "register-btn":
+                # Register a new user and generate RSA keys
+                self.app.client.register(username, password)
+                self.app.notify("Registration successful! Please login.")
+        
+        except Exception as e:
+            self.app.notify(f"Auth Error: {e}", severity="error")
+
+class MainScreen(Screen):
+    """The main chat interface screen."""
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        with Horizontal(id="main-container"):
+            # Sidebar showing registered/online users
+            with Vertical(id="sidebar"):
+                yield Label(" ONLINE USERS", id="sidebar-title")
+                yield ListView(id="user-list")
+            
+            # Main chat area
+            with Vertical(id="chat-area"):
+                yield Label("Select a contact to start chatting", id="chat-header")
+                yield ScrollableContainer(id="message-list")
+                yield Input(placeholder="Type a message...", id="chat-input")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        """Fetch users from the server and start periodic updates."""
+        # Initial fetch
+        self.app.update_user_list()
+        
+        # FIX: Set an interval to trigger the update every 5 seconds
+        self.set_interval(5, self.app.update_user_list)
+
+class ChatApp(App):
+    """The main application class managing state and screens."""
+    CSS_PATH = "chat.tcss"
+    BINDINGS = [Binding("q", "quit", "Exit")]
+
+    def __init__(self):
+        super().__init__()
+        # Initialize the backend client pointing to the FastAPI server
+        self.client = ChatClient("http://localhost:8000")
+        self.current_recipient = None
+
+    def on_mount(self) -> None:
+        """Start the application with the login screen."""
+        self.push_screen(LoginScreen())
+
+    def update_user_list(self) -> None:
+        """Update the sidebar with the list of users from the backend."""
+        try:
+            users = self.client.get_users()
+            user_list = self.query_one("#user-list")
+            user_list.clear()
+            for user in users:
+                # Basic online status indicator
+                status = "🟢" if user.get('online') else "⚪"
+                user_list.mount(ListItem(Static(f"{status} {user['username']}"), id=user['username']))
+        except Exception:
+            # Silently ignore if widget is not found (e.g. during screen transition)
+            pass
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Switch chat context when a user is selected in the list."""
+        self.current_recipient = event.item.id
+        self.query_one("#chat-header").update(f"Chatting with [bold]{self.current_recipient}[/]")
+        # Clear the message area for the new contact
+        self.query_one("#message-list").query("*").remove()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Send an encrypted message when Enter is pressed."""
+        if not self.current_recipient:
+            self.notify("Please select a user first", severity="warning")
+            return
+
+        message_text = event.value.strip()
+        if message_text:
+            try:
+                # Client handles E2EE (AES/RSA) automatically
+                self.client.send_message(self.current_recipient, message_text)
+                
+                # Display the message locally
+                msg_list = self.query_one("#message-list")
+                msg_list.mount(Message("Me", message_text, self_sent=True))
+                
+                # Reset input and scroll to bottom
+                self.query_one("#chat-input").value = ""
+                msg_list.scroll_end()
+            except Exception as e:
+                self.notify(f"Send Error: {e}", severity="error")
+
+    def handle_new_message(self, sender: str, message: str, timestamp: str) -> None:
+        """Callback triggered by the backend's MessageWorker thread."""
+        if sender == self.current_recipient:
+            # Use call_from_thread to safely update UI from the background thread
+            self.call_from_thread(self.display_incoming, sender, message)
+        else:
+            self.notify(f"New message from {sender}")
+
+    def display_incoming(self, sender: str, text: str) -> None:
+        """Render the incoming message in the UI."""
+        msg_list = self.query_one("#message-list")
+        msg_list.mount(Message(sender, text, self_sent=False))
+        msg_list.scroll_end()
+
+if __name__ == "__main__":
+    app = ChatApp()
+    app.run()
