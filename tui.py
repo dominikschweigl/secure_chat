@@ -3,7 +3,7 @@ from textual.containers import Horizontal, Vertical, ScrollableContainer, Center
 from textual.widgets import Header, Footer, Input, ListItem, ListView, Static, Label, Button
 from textual.screen import Screen
 from textual.binding import Binding
-# Importing the ChatClient for backend communication
+
 from client.chat_client import ChatClient
 
 class Message(Static):
@@ -78,8 +78,7 @@ class MainScreen(Screen):
         """Fetch users from the server and start periodic updates."""
         # Initial fetch
         self.app.update_user_list()
-        
-        # FIX: Set an interval to trigger the update every 5 seconds
+        # Periodically update the user list every 5 seconds
         self.set_interval(5, self.app.update_user_list)
 
 class ChatApp(App):
@@ -108,7 +107,6 @@ class ChatApp(App):
                 status = "🟢" if user.get('online') else "⚪"
                 user_list.mount(ListItem(Static(f"{status} {user['username']}"), id=user['username']))
         except Exception:
-            # Silently ignore if widget is not found (e.g. during screen transition)
             pass
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
@@ -127,7 +125,6 @@ class ChatApp(App):
         message_text = event.value.strip()
         if message_text:
             try:
-                # Client handles E2EE (AES/RSA) automatically
                 self.client.send_message(self.current_recipient, message_text)
                 
                 # Display the message locally
