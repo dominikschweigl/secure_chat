@@ -1,3 +1,4 @@
+import json
 import requests
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import AES, PKCS1_OAEP
@@ -87,15 +88,24 @@ class ChatClient:
         )
         response.raise_for_status()
 
-        session_key = response.json().get('session-key')
+        # load private key for this user
+        self.rsa_key = self.keystore.load_own_key(username)
+
+        # encryption: cipher_rsa.encrypt(raw_key.encode()).hex()
+        encrypted_session_key = response.json().get('session-key')
+
+        cipher_rsa = PKCS1_OAEP.new(self.rsa_key, hashAlgo=SHA256)
+        decrypted_session_key = cipher_rsa.decrypt(bytes.fromhex(encrypted_session_key))
+        session_key = decrypted_session_key.decode('utf-8')
+
+        # Write session key to file
+        with open(f"keys/{username}_session_key.txt", "w") as f:
+            f.write(session_key)
 
         with self._state_lock:
             self.username = username
             self.session_key = session_key
             self.logged_in = True
-
-        # load private key for this user
-        self.rsa_key = self.keystore.load_own_key(username)
 
         # start presence heartbeats
         self.presence.start(session_key)
@@ -120,8 +130,8 @@ class ChatClient:
             raise RuntimeError("You are not logged in.")
         
         response = requests.post(
-            f"{self.server_address}{self.LOGOUT_ENDPOINT}", 
-            data={'session-key': self.session_key}
+            f"{self.server_address}{self.LOGOUT_ENDPOINT}",
+            headers={'X-Session-Key': self.session_key}
         )
         response.raise_for_status()
 
@@ -153,13 +163,17 @@ class ChatClient:
             requests.exceptions.RequestException: If the request fails
         """
         response = requests.get(
-            f"{self.server_address}{self.USERS_ENDPOINT}"
+            f"{self.server_address}{self.USERS_ENDPOINT}",
+            headers={'X-Session-Key': self.session_key}
         )
         response.raise_for_status()
         
         users_data = response.json()
+
+        with open(f"keys/{self.username}_users.json", "w") as f:
+            f.write(json.dumps(users_data, indent=4))
         
-        return users_data.get('users', [])
+        return users_data
     
     def send_message(self, recipient_username: str, message: str) -> None:
         """
@@ -194,7 +208,7 @@ class ChatClient:
         endpoint = self.MESSAGE_ENDPOINT.format(username=recipient_username)
         response = requests.post(
             f"{self.server_address}{endpoint}",
-            data={'message': encrypted_message}
+            headers={'X-Session-Key': self.session_key}
         )
 
         response.raise_for_status()
@@ -296,7 +310,8 @@ class ChatClient:
         endpoint = self.KEY_EXCHANGE_ENDPOINT.format(username=recipient_username)
         response = requests.post(
             f"{self.server_address}{endpoint}",
-            data={'encrypted_key': encrypted_key}
+            data={'encrypted_key': encrypted_key},
+            headers={'X-Session-Key': self.session_key}
         )
         response.raise_for_status()
     

@@ -77,9 +77,24 @@ class MainScreen(Screen):
     def on_mount(self) -> None:
         """Fetch users from the server and start periodic updates."""
         # Initial fetch
-        self.app.update_user_list()
+        self.update_user_list()
         # Periodically update the user list every 5 seconds
-        self.set_interval(5, self.app.update_user_list)
+        self.set_interval(5, self.update_user_list)
+
+    def update_user_list(self) -> None:
+        try:
+            users = self.app.client.get_users()
+            user_list = self.query_one("#user-list")
+            user_list.clear()
+
+            for user in users:
+                status = "🟢" if user.get("online") else "⚪"
+                item = ListItem(Static(f"{status} {user['username']}"))
+                item.username = user["username"]
+                user_list.mount(item)
+                
+        except Exception as e:
+            self.notify(f"Error: {e}", severity="error")
 
 class ChatApp(App):
     """The main application class managing state and screens."""
@@ -96,22 +111,9 @@ class ChatApp(App):
         """Start the application with the login screen."""
         self.push_screen(LoginScreen())
 
-    def update_user_list(self) -> None:
-        """Update the sidebar with the list of users from the backend."""
-        try:
-            users = self.client.get_users()
-            user_list = self.query_one("#user-list")
-            user_list.clear()
-            for user in users:
-                # Basic online status indicator
-                status = "🟢" if user.get('online') else "⚪"
-                user_list.mount(ListItem(Static(f"{status} {user['username']}"), id=user['username']))
-        except Exception:
-            pass
-
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Switch chat context when a user is selected in the list."""
-        self.current_recipient = event.item.id
+        self.current_recipient = event.item.username
         self.query_one("#chat-header").update(f"Chatting with [bold]{self.current_recipient}[/]")
         # Clear the message area for the new contact
         self.query_one("#message-list").query("*").remove()

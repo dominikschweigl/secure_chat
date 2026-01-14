@@ -208,3 +208,7 @@ __marimo__/
 
 # Persistant server database file
 server.db
+
+# Keys and certificates
+keys/
+*.pem
