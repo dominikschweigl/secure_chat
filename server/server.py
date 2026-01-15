@@ -243,16 +243,15 @@ async def get_messages(current_user: User = Depends(get_current_user)):
     """
     topic = f"user_queue_{current_user.username}"
     consumer = AIOKafkaConsumer(
+        topic,
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         auto_offset_reset='earliest',
-        enable_auto_commit=False
+        enable_auto_commit=True,
+        group_id=f"client_{current_user.username}"
     )
     messages = []
     try:
         await consumer.start()
-        tp = TopicPartition(topic, 0)
-        consumer.assign([tp])
-        await consumer.seek_to_beginning(tp)
         data = await consumer.getmany(timeout_ms=1000)
         for tp_key, msgs in data.items():
             for msg in msgs:
