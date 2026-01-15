@@ -79,8 +79,8 @@ class MainScreen(Screen):
         self.app.client.on_message_received = self.handle_new_message
         # Initial fetch
         self.update_user_list()
-        # Periodically update the user list every 5 seconds
-        self.user_refresh = self.set_interval(5, self.update_user_list)
+        # Periodically update the user list every 3 seconds
+        self.user_refresh = self.set_interval(3, self.update_user_list)
 
     def on_unmount(self) -> None:
         if self.app.client.on_message_received is self.handle_new_message:

@@ -261,6 +261,7 @@ async def get_messages(current_user: User = Depends(get_current_user)):
         print(f"Polling error: {e}")
     finally:
         await consumer.stop()
+    print(f"Retrieved messages: {messages} messages for user {current_user.username}")
     return {"messages": messages}
 
 
@@ -324,7 +325,7 @@ def list_users(db: Session = Depends(get_db), current_user: User = Depends(get_c
     return [
         {
             "username": u.username, 
-            "online": u.last_seen and u.last_seen > datetime.utcnow() - timedelta(seconds=15)
+            "online": u.last_seen and u.last_seen > datetime.utcnow() - timedelta(seconds=6)
         } for u in users
     ]
 

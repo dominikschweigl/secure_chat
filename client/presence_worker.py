@@ -5,7 +5,7 @@ class PresenceWorker:
     """
     Periodically sends presence updates while a user is logged in.
     """
-    def __init__(self, server_address: str, endpoint: str, interval_seconds: int = 10):
+    def __init__(self, server_address: str, endpoint: str, interval_seconds: int = 3):
         self.server_address = server_address
         self.endpoint = endpoint
         self.interval_seconds = interval_seconds
