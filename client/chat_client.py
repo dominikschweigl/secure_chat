@@ -21,7 +21,7 @@ class ChatClient:
     PRESENCE_ENDPOINT = "/presence"
     USERS_ENDPOINT = "/chat/users"
     PUBLIC_KEY_ENDPOINT = "/chat/{username}/publickey"
-    MESSAGE_ENDPOINT = "/chat/{username}"
+    MESSAGE_ENDPOINT = "/chat/{username}/send"
     KEY_EXCHANGE_ENDPOINT = "/chat/{username}/keyexchange"
     MESSAGES_ENDPOINT = "/chat/messages"
     KEY_EXCHANGES_ENDPOINT = "/chat/keyexchanges"
@@ -206,6 +206,7 @@ class ChatClient:
         endpoint = self.MESSAGE_ENDPOINT.format(username=recipient_username)
         response = requests.post(
             f"{self.server_address}{endpoint}",
+            json={'message': encrypted_message},
             headers={'X-Session-Key': self.session_key}
         )
 
@@ -308,7 +309,7 @@ class ChatClient:
         endpoint = self.KEY_EXCHANGE_ENDPOINT.format(username=recipient_username)
         response = requests.post(
             f"{self.server_address}{endpoint}",
-            data={'encrypted_key': encrypted_key},
+            json={'encrypted_key': encrypted_key},
             headers={'X-Session-Key': self.session_key}
         )
         response.raise_for_status()

@@ -264,7 +264,7 @@ async def get_messages(current_user: User = Depends(get_current_user)):
     return {"messages": messages}
 
 
-@app.post("/chat/{username}")
+@app.post("/chat/{username}/send")
 async def send_message(username: str, data: MessageSend, current_user: User = Depends(get_current_user)):
     """
     Sends a chat message to a specific user.

@@ -212,3 +212,6 @@ server.db
 # Keys and certificates
 keys/
 *.pem
+
+# Messages log
+messages/
