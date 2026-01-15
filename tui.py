@@ -43,8 +43,6 @@ class LoginScreen(Screen):
             if event.button.id == "login-btn":
                 # Authenticate with the backend server
                 self.app.client.login(username, password)
-                # Set the callback to handle incoming messages from Kafka
-                self.app.client.on_message_received = self.app.handle_new_message
                 # Transition to the main chat interface
                 self.app.push_screen(MainScreen())
                 self.app.notify(f"Logged in as {username}")
@@ -76,10 +74,19 @@ class MainScreen(Screen):
 
     def on_mount(self) -> None:
         """Fetch users from the server and start periodic updates."""
+        self.current_recipient = None
+        # Register callback *when this screen is active*
+        self.app.client.on_message_received = self.handle_new_message
         # Initial fetch
         self.update_user_list()
         # Periodically update the user list every 5 seconds
-        self.set_interval(5, self.update_user_list)
+        self.user_refresh = self.set_interval(5, self.update_user_list)
+
+    def on_unmount(self) -> None:
+        if self.app.client.on_message_received is self.handle_new_message:
+            self.app.client.on_message_received = None
+        if hasattr(self, "user_refresh"):
+            self.user_refresh.stop()
 
     def update_user_list(self) -> None:
         try:
@@ -94,7 +101,49 @@ class MainScreen(Screen):
                 user_list.mount(item)
                 
         except Exception as e:
-            self.notify(f"Error: {e}", severity="error")
+            self.app.notify(f"Error: {e}", severity="error")
+    
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Switch chat context when a user is selected in the list."""
+        self.current_recipient = event.item.username
+        self.query_one("#chat-header").update(f"Chatting with [bold]{self.current_recipient}[/]")
+        # Clear the message area for the new contact
+        self.query_one("#message-list").query("*").remove()
+    
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Send an encrypted message when Enter is pressed."""
+        if not self.current_recipient:
+            self.app.notify("Please select a user first", severity="warning")
+            return
+
+        message_text = event.value.strip()
+        if message_text:
+            try:
+                self.app.client.send_message(self.current_recipient, message_text)
+                
+                # Display the message locally
+                msg_list = self.query_one("#message-list")
+                msg_list.mount(Message("Me", message_text, self_sent=True))
+                
+                # Reset input and scroll to bottom
+                self.query_one("#chat-input").value = ""
+                msg_list.scroll_end()
+            except Exception as e:
+                self.app.notify(f"Send Error: {e}", severity="error")
+    
+    def handle_new_message(self, sender: str, message: str, timestamp: str) -> None:
+        """Callback triggered by the backend's MessageWorker thread."""
+        if sender == self.current_recipient:
+            # Use call_from_thread to safely update UI from the background thread
+            self.call_from_thread(self.display_incoming, sender, message)
+        else:
+            self.call_from_thread(self.app.notify, f"New message from {sender}")
+
+    def display_incoming(self, sender: str, text: str) -> None:
+        """Render the incoming message in the UI."""
+        msg_list = self.query_one("#message-list")
+        msg_list.mount(Message(sender, text, self_sent=False))
+        msg_list.scroll_end()
 
 class ChatApp(App):
     """The main application class managing state and screens."""
@@ -105,53 +154,11 @@ class ChatApp(App):
         super().__init__()
         # Initialize the backend client pointing to the FastAPI server
         self.client = ChatClient("http://localhost:8000")
-        self.current_recipient = None
 
     def on_mount(self) -> None:
         """Start the application with the login screen."""
         self.push_screen(LoginScreen())
 
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
-        """Switch chat context when a user is selected in the list."""
-        self.current_recipient = event.item.username
-        self.query_one("#chat-header").update(f"Chatting with [bold]{self.current_recipient}[/]")
-        # Clear the message area for the new contact
-        self.query_one("#message-list").query("*").remove()
-
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Send an encrypted message when Enter is pressed."""
-        if not self.current_recipient:
-            self.notify("Please select a user first", severity="warning")
-            return
-
-        message_text = event.value.strip()
-        if message_text:
-            try:
-                self.client.send_message(self.current_recipient, message_text)
-                
-                # Display the message locally
-                msg_list = self.query_one("#message-list")
-                msg_list.mount(Message("Me", message_text, self_sent=True))
-                
-                # Reset input and scroll to bottom
-                self.query_one("#chat-input").value = ""
-                msg_list.scroll_end()
-            except Exception as e:
-                self.notify(f"Send Error: {e}", severity="error")
-
-    def handle_new_message(self, sender: str, message: str, timestamp: str) -> None:
-        """Callback triggered by the backend's MessageWorker thread."""
-        if sender == self.current_recipient:
-            # Use call_from_thread to safely update UI from the background thread
-            self.call_from_thread(self.display_incoming, sender, message)
-        else:
-            self.notify(f"New message from {sender}")
-
-    def display_incoming(self, sender: str, text: str) -> None:
-        """Render the incoming message in the UI."""
-        msg_list = self.query_one("#message-list")
-        msg_list.mount(Message(sender, text, self_sent=False))
-        msg_list.scroll_end()
 
 if __name__ == "__main__":
     app = ChatApp()
