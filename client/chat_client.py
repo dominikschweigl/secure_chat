@@ -484,12 +484,15 @@ class ChatClient:
             symmetric_key = self._get_symmetric_key(sender)
             if not symmetric_key:
                 # No key exists - skip this message (sender should have sent key first)
-                print(f"No symmetric key found for {sender}, skipping message")
+                with open('./errors/decryption.log', 'a') as f:
+                    f.write(f'No symmetric key for {sender} at {timestamp}, skipping message\n')
                 continue
             
             # Decrypt the message
             try:
                 plaintext = self._decrypt_message(encrypted_content, symmetric_key)
+                with open('./errors/decryption.log', 'a') as f:
+                    f.write(f'Decrypted message from {sender} at {timestamp}: {plaintext}\n')
             except Exception:
                 print("Failed to decrypt message from", sender)
                 continue
@@ -507,6 +510,21 @@ class ChatClient:
             # Trigger message received callback
             if self.on_message_received:
                 self.on_message_received(sender, plaintext, timestamp)
+    
+    def get_message_history(self, contact_username: str):
+        """
+        Retrieve message history with a specific contact.
+        
+        Args:
+            contact_username: The contact's username
+            
+        Returns:
+            list: List of message dicts with keys: sender, recipient, message, timestamp
+        """
+        with self._state_lock:
+            current_username = self.username
+        
+        return self.message_store.load_messages(current_username, contact_username)
     
     def is_logged_in(self) -> bool:
         return self.logged_in

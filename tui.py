@@ -109,6 +109,16 @@ class MainScreen(Screen):
         self.query_one("#chat-header").update(f"Chatting with [bold]{self.current_recipient}[/]")
         # Clear the message area for the new contact
         self.query_one("#message-list").query("*").remove()
+        # Load message history for the selected contact
+        try:
+            history = self.app.client.get_message_history(self.current_recipient)
+            msg_list = self.query_one("#message-list")
+            for msg in history:
+                self_sent = (msg["sender"] == self.app.client.username)
+                msg_list.mount(Message(msg["sender"], msg["message"], self_sent=self_sent))
+            msg_list.scroll_end()
+        except Exception as e:
+            self.app.notify(f"History Load Error: {e}", severity="error")
     
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Send an encrypted message when Enter is pressed."""
