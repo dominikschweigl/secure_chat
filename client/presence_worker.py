@@ -31,7 +31,6 @@ class PresenceWorker:
             try:
                 response = requests.post(
                     f"{self.server_address}{self.endpoint}",
-                    data={"online": "true"},
                     headers={"X-Session-Key": session_key}
                 )
                 response.raise_for_status()

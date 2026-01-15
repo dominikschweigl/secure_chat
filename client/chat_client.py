@@ -18,7 +18,7 @@ class ChatClient:
     REGISTER_ENDPOINT = "/chat/auth/register"
     LOGIN_ENDPOINT = "/chat/auth/login"
     LOGOUT_ENDPOINT = "/chat/auth/logout"
-    PRESENCE_ENDPOINT = "/chat/presence"
+    PRESENCE_ENDPOINT = "/presence"
     USERS_ENDPOINT = "/chat/users"
     PUBLIC_KEY_ENDPOINT = "/chat/{username}/publickey"
     MESSAGE_ENDPOINT = "/chat/{username}"

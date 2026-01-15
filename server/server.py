@@ -60,9 +60,6 @@ class MessageSend(BaseModel):
 class KeyExchange(BaseModel):
     encrypted_key: str
 
-class PresenceUpdate(BaseModel):
-    online: bool
-
 app = FastAPI(title="Secure E2EE Chat Server")
 producer: Optional[AIOKafkaProducer] = None
 
@@ -291,9 +288,8 @@ async def send_message(username: str, data: MessageSend, current_user: User = De
     return {"status": "OK"}
 
 
-@app.post("/chat/presence")
+@app.post("/presence")
 def update_presence(
-    data: PresenceUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -307,7 +303,7 @@ def update_presence(
     Returns:
         dict: {"status": "OK"}
     """
-    current_user.last_seen = datetime.now(timezone.utc)
+    current_user.last_seen = datetime.utcnow()
     db.commit()
     return {"status": "OK"}
 
@@ -328,7 +324,7 @@ def list_users(db: Session = Depends(get_db), current_user: User = Depends(get_c
     return [
         {
             "username": u.username, 
-            "online": u.last_seen and u.last_seen > datetime.now(timezone.utc) - timedelta(seconds=15)
+            "online": u.last_seen and u.last_seen > datetime.utcnow() - timedelta(seconds=15)
         } for u in users
     ]
 
