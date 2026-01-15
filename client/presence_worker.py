@@ -29,10 +29,14 @@ class PresenceWorker:
     def _run(self, session_key: str):
         while not self._stop_event.wait(self.interval_seconds):
             try:
-                requests.post(
-                    f"{self.server_address}{self.endpoint}", 
-                    data={"session-key": session_key}
+                response = requests.post(
+                    f"{self.server_address}{self.endpoint}",
+                    data={"online": "true"},
+                    headers={"X-Session-Key": session_key}
                 )
-            except requests.RequestException:
+                response.raise_for_status()
+            except requests.RequestException as e:
                 # Swallow presence errors; keep trying until stopped
+                with open('./errors/presence_errors.log', 'a') as f:
+                    f.write(f'Presence update failed: {e}\n')
                 continue

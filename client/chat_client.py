@@ -13,8 +13,6 @@ from .presence_worker import PresenceWorker
 from .message_store import MessageStore
 from .message_worker import MessageWorker
 
-# TODO: Implement session key management
-
 class ChatClient:
 
     REGISTER_ENDPOINT = "/chat/auth/register"

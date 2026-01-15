@@ -158,6 +158,10 @@ class ChatApp(App):
     def on_mount(self) -> None:
         """Start the application with the login screen."""
         self.push_screen(LoginScreen())
+    
+    def on_unmount(self) -> None:
+        """Ensure client cleanup on app exit."""
+        self.client.logout()
 
 
 if __name__ == "__main__":

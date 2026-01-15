@@ -3,11 +3,11 @@ import os
 import secrets
 import hashlib
 import asyncio
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timezone, timedelta
+from typing import List, Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Header, status
-from sqlalchemy import create_engine, Column, String, Boolean, Text
+from sqlalchemy import create_engine, Column, String, DateTime, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel, Field
@@ -39,7 +39,7 @@ class User(Base):
     username = Column(String, primary_key=True, index=True)
     password_hash = Column(String)
     public_key = Column(Text)
-    is_online = Column(Boolean, default=False)
+    last_seen = Column(DateTime, nullable=True)
     session_key_hash = Column(String, nullable=True, index=True)
 
 Base.metadata.create_all(bind=engine)
@@ -198,6 +198,8 @@ def login(user_data: UserLogin, db: Session = Depends(get_db)):
     Raises:
         HTTPException 401: If credentials are invalid.
     """
+    print("Login attempt for user:", user_data.username)
+    print("password:", user_data.password)
     user = db.query(User).filter(User.username == user_data.username).first()
     if not user or not pwd_context.verify(user_data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -289,9 +291,8 @@ async def send_message(username: str, data: MessageSend, current_user: User = De
     return {"status": "OK"}
 
 
-@app.post("/chat/presence/{username}")
+@app.post("/chat/presence")
 def update_presence(
-    username: str,
     data: PresenceUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -300,20 +301,13 @@ def update_presence(
     Updates the online/offline presence of the authenticated user.
 
     Args:
-        username (str): Must match current user.
-        data (PresenceUpdate): {"online": bool}.
         db (Session): Database session.
         current_user (User): Authenticated user.
 
     Returns:
         dict: {"status": "OK"}
-
-    Raises:
-        HTTPException 403: If attempting to update another user's presence.
     """
-    if username != current_user.username:
-        raise HTTPException(status_code=403, detail="Cannot update other user's presence")
-    current_user.is_online = data.online
+    current_user.last_seen = datetime.now(timezone.utc)
     db.commit()
     return {"status": "OK"}
 
@@ -330,8 +324,13 @@ def list_users(db: Session = Depends(get_db), current_user: User = Depends(get_c
     Returns:
         list: [{"username": str, "online": bool}]
     """
-    users = db.query(User).all()
-    return [{"username": u.username, "online": u.is_online} for u in users]
+    users: List[User] = db.query(User).all()
+    return [
+        {
+            "username": u.username, 
+            "online": u.last_seen and u.last_seen > datetime.now(timezone.utc) - timedelta(seconds=15)
+        } for u in users
+    ]
 
 
 @app.post("/chat/{username}/keyexchange")
@@ -359,7 +358,7 @@ async def key_exchange(username: str, data: KeyExchange, current_user: User = De
 
 
 @app.get("/chat/{username}/publickey")
-def get_public_key(username: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def get_public_key(username: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     Retrieves the public key of a target user for E2EE initialization.
 

@@ -48,7 +48,8 @@ class MessageWorker:
             
         try:
             response = requests.get(
-                f"{self.server_address}{self.endpoint}"
+                f"{self.server_address}{self.endpoint}",
+                headers={"X-Session-Key": self._session_key}
             )
             response.raise_for_status()
             return response.json().get('messages', [])
