@@ -83,7 +83,7 @@ class ChatClient:
             requests.exceptions.RequestException: If the request fails
         """
         hashed_password = SHA256.new(password.encode('utf-8')).hexdigest()
-        
+
         response = requests.post(
             f"{self.server_address}{self.LOGIN_ENDPOINT}", 
             json={'username': username, 'password': hashed_password}
@@ -201,20 +201,21 @@ class ChatClient:
         if not self.is_logged_in():
             raise RuntimeError("You must be logged in to send messages.")
         
-        # Get or establish symmetric key with recipient
-        symmetric_key = self._get_or_establish_symmetric_key(recipient_username)
-        
-        # Encrypt the message
-        encrypted_message = self._encrypt_message(message, symmetric_key)
-        
-        endpoint = self.MESSAGE_ENDPOINT.format(username=recipient_username)
-        response = requests.post(
-            f"{self.server_address}{endpoint}",
-            json={'message': encrypted_message},
-            headers={'X-Session-Key': self.session_key}
-        )
+        if recipient_username != self.username:
+            # Get or establish symmetric key with recipient
+            symmetric_key = self._get_or_establish_symmetric_key(recipient_username)
+            
+            # Encrypt the message
+            encrypted_message = self._encrypt_message(message, symmetric_key)
+            
+            endpoint = self.MESSAGE_ENDPOINT.format(username=recipient_username)
+            response = requests.post(
+                f"{self.server_address}{endpoint}",
+                json={'message': encrypted_message},
+                headers={'X-Session-Key': self.session_key}
+            )
 
-        response.raise_for_status()
+            response.raise_for_status()
 
         self.message_store.save_message(
             self.username, recipient_username,
