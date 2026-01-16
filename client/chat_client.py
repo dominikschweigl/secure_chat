@@ -131,17 +131,17 @@ class ChatClient:
         if not self.logged_in:
             raise RuntimeError("You are not logged in.")
         
+        # stop message polling
+        self.message_worker.stop()
+
+        # stop presence heartbeats
+        self.presence.stop()
+        
         response = requests.post(
             f"{self.server_address}{self.LOGOUT_ENDPOINT}",
             headers={'X-Session-Key': self.session_key}
         )
         response.raise_for_status()
-
-        # stop presence heartbeats
-        self.presence.stop()
-        
-        # stop message polling
-        self.message_worker.stop()
 
         with self._state_lock:
             self.username = None

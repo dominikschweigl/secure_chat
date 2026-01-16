@@ -64,6 +64,7 @@ class MainScreen(Screen):
             with Vertical(id="sidebar"):
                 yield Label(" ONLINE USERS", id="sidebar-title")
                 yield ListView(id="user-list")
+                yield Button("Logout", variant="error", id="logout-btn")
             
             # Main chat area
             with Vertical(id="chat-area"):
@@ -163,6 +164,16 @@ class MainScreen(Screen):
         msg_list = self.query_one("#message-list")
         msg_list.mount(Message(sender, text, self_sent=(sender == self.app.client.username)))
         msg_list.scroll_end()
+    
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle logout button click."""
+        if event.button.id == "logout-btn":
+            try:
+                self.app.client.logout()
+                self.app.pop_screen()
+                self.app.notify("Logged out successfully")
+            except Exception as e:
+                self.app.notify(f"Logout Error: {e}", severity="error")
 
 class ChatApp(App):
     """The main application class managing state and screens."""
