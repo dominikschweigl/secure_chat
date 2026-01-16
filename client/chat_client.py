@@ -24,7 +24,7 @@ class ChatClient:
     MESSAGE_ENDPOINT = "/chat/{username}/send"
     KEY_EXCHANGE_ENDPOINT = "/chat/{username}/keyexchange"
     MESSAGES_ENDPOINT = "/chat/messages"
-    KEY_EXCHANGES_ENDPOINT = "/chat/keyexchanges"
+    GET_KEY_EXCHANGES_ENDPOINT = "/chat/keyexchange"
 
     def __init__(self, server_address: str, keystore: KeyStore | None = None):
         self.server_address: str = server_address
@@ -97,7 +97,7 @@ class ChatClient:
         session_key = decrypted_session_key.decode('utf-8')
 
         # Write session key to file
-        with open(f"keys/{username}_session_key.txt", "w") as f:
+        with open(f"keys/{username}/session_key.txt", "w") as f:
             f.write(session_key)
 
         with self._state_lock:
@@ -168,7 +168,7 @@ class ChatClient:
         
         users_data = response.json()
 
-        with open(f"keys/{self.username}_users.json", "w") as f:
+        with open(f"keys/{self.username}/users.json", "w") as f:
             f.write(json.dumps(users_data, indent=4))
         
         return users_data
@@ -306,13 +306,19 @@ class ChatClient:
         cipher_rsa = PKCS1_OAEP.new(recipient_rsa_key)
         encrypted_key = base64.b64encode(cipher_rsa.encrypt(symmetric_key)).decode('utf-8')
         
+        with open('./errors/decryption.log', 'a') as f:
+            f.write(f'Sending symmetric key to {recipient_username}\n')
+        
         endpoint = self.KEY_EXCHANGE_ENDPOINT.format(username=recipient_username)
         response = requests.post(
             f"{self.server_address}{endpoint}",
-            json={'encrypted_key': encrypted_key},
+            json={'encrypted_key': encrypted_key, "sender": self.username},
             headers={'X-Session-Key': self.session_key}
         )
         response.raise_for_status()
+        
+        with open('./errors/decryption.log', 'a') as f:
+            f.write(f'✓ Symmetric key sent to {recipient_username}\n')
     
     def _fetch_and_process_key_exchanges(self) -> None:
         """
@@ -320,20 +326,32 @@ class ChatClient:
         This is called when looking for a key that doesn't exist locally.
         """
         if not self.is_logged_in():
+            with open('./errors/decryption.log', 'a') as f:
+                f.write('Not logged in, skipping key exchange fetch\n')
             return
         
         try:
             # Fetch key exchange messages from the dedicated queue
+            with open('./errors/decryption.log', 'a') as f:
+                f.write(f'Fetching key exchanges from {self.GET_KEY_EXCHANGES_ENDPOINT}\n')
+            
             response = requests.get(
-                f"{self.server_address}{self.KEY_EXCHANGES_ENDPOINT}"
+                f"{self.server_address}{self.GET_KEY_EXCHANGES_ENDPOINT}",
+                headers={'X-Session-Key': self.session_key}
             )
             response.raise_for_status()
             key_exchanges = response.json().get('keys', [])
+            
+            with open('./errors/decryption.log', 'a') as f:
+                f.write(f'Fetched {len(key_exchanges)} key exchange messages\n')
             
             # Process all received key exchange messages
             for key_msg in key_exchanges:
                 sender = key_msg.get('sender')
                 encrypted_key = key_msg.get('encrypted_key')
+                
+                with open('./errors/decryption.log', 'a') as f:
+                    f.write(f'Processing key exchange from {sender}\n')
                 
                 if sender and encrypted_key:
                     try:
@@ -349,11 +367,14 @@ class ChatClient:
                                 current_username = self.username
                             self.keystore.save_symmetric_key(current_username, sender, symmetric_key)
                         
-                        print(f"Received and stored symmetric key from {sender}")
+                        with open('./errors/decryption.log', 'a') as f:
+                            f.write(f'✓ Received and stored symmetric key from {sender}\n')
                     except Exception as e:
-                        print(f"Failed to decrypt key from {sender}: {e}")
+                        with open('./errors/decryption.log', 'a') as f:
+                            f.write(f'Failed to decrypt key from {sender}: {e}\n')
         except Exception as e:
-            print(f"Failed to fetch key exchanges: {e}")
+            with open('./errors/decryption.log', 'a') as f:
+                f.write(f'Failed to fetch key exchanges: {e}\n')
 
     def _get_public_key(self, username: str):
         """
@@ -379,7 +400,8 @@ class ChatClient:
         # Fetch from server
         endpoint = self.PUBLIC_KEY_ENDPOINT.format(username=username)
         response = requests.get(
-            f"{self.server_address}{endpoint}"
+            f"{self.server_address}{endpoint}",
+            headers={'X-Session-Key': self.session_key}
         )
         response.raise_for_status()
         
@@ -476,6 +498,9 @@ class ChatClient:
             sender = msg.get('sender')
             encrypted_content = msg.get('message')
             timestamp = msg.get('timestamp')
+
+            with open('./errors/decryption.log', 'a') as f:
+                f.write(f'Received message from {sender} at {timestamp}: {encrypted_content}\n')
             
             if not sender or not encrypted_content:
                 continue
@@ -493,8 +518,9 @@ class ChatClient:
                 plaintext = self._decrypt_message(encrypted_content, symmetric_key)
                 with open('./errors/decryption.log', 'a') as f:
                     f.write(f'Decrypted message from {sender} at {timestamp}: {plaintext}\n')
-            except Exception:
-                print("Failed to decrypt message from", sender)
+            except Exception as e:
+                with open('./errors/decryption.log', 'a') as f:
+                    f.write(f'Decryption failed for message from {sender} at {timestamp}: {e}\n')
                 continue
             
             # Store in MessageStore

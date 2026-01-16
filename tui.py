@@ -96,7 +96,8 @@ class MainScreen(Screen):
 
             for user in users:
                 status = "🟢" if user.get("online") else "⚪"
-                item = ListItem(Static(f"{status} {user['username']}"))
+                username = user["username"] + " (You)" if user["username"] == self.app.client.username else user["username"]
+                item = ListItem(Static(f"{status} {username}"))
                 item.username = user["username"]
                 user_list.mount(item)
                 

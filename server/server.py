@@ -141,7 +141,11 @@ def ensure_kafka_topic(username: str):
     try:
         admin_client = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS, client_id='admin')
         topic_name = f"user_queue_{username}"
-        admin_client.create_topics([NewTopic(name=topic_name, num_partitions=1, replication_factor=1)])
+        topic_name_key = f"user_queue_key_{username}"
+        admin_client.create_topics([
+            NewTopic(name=topic_name, num_partitions=1, replication_factor=1),
+            NewTopic(name=topic_name_key, num_partitions=1, replication_factor=1)
+        ])
         admin_client.close()
     except TopicAlreadyExistsError:
         pass
@@ -211,7 +215,7 @@ def login(user_data: UserLogin, db: Session = Depends(get_db)):
 
 
 @app.post("/chat/auth/logout") 
-def logout(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def logout(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     Logs out the current user.
 
@@ -289,7 +293,7 @@ async def send_message(username: str, data: MessageSend, current_user: User = De
 
 
 @app.post("/presence")
-def update_presence(
+async def update_presence(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -309,7 +313,7 @@ def update_presence(
 
 
 @app.get("/chat/users")
-def list_users(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def list_users(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     Lists all registered users and their online status.
 
@@ -342,7 +346,7 @@ async def key_exchange(username: str, data: KeyExchange, current_user: User = De
     Returns:
         dict: {"status": "OK"}
     """
-    topic = f"user_queue_{username}"
+    topic = f"user_queue_key_{username}"
     payload = {
         "type": "KEY_EXCHANGE",
         "sender": current_user.username,
@@ -352,16 +356,55 @@ async def key_exchange(username: str, data: KeyExchange, current_user: User = De
     await producer.send_and_wait(topic, json.dumps(payload).encode())
     return {"status": "OK"}
 
+@app.get("/chat/keyexchange")
+async def get_key_exchanges(current_user: User = Depends(get_current_user)):
+    """
+    Retrieves all pending key exchanges for the authenticated user.
+
+    Args:
+        current_user (User): Authenticated user.
+    
+    Returns:
+        dict: {"keys": [
+            {"sender": str, "encrypted_key": str}
+        ]}
+    """
+
+    topic = f"user_queue_key_{current_user.username}"
+    consumer = AIOKafkaConsumer(
+        topic,
+        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+        auto_offset_reset='earliest',
+        enable_auto_commit=True,
+        group_id=f"client_key_{current_user.username}"
+    )
+    keys = []
+    try:
+        await consumer.start()
+        data = await consumer.getmany(timeout_ms=1000)
+        for tp_key, msgs in data.items():
+            for msg in msgs:
+                record = json.loads(msg.value.decode())
+                keys.append({
+                    "sender": record["sender"],
+                    "encrypted_key": record["encrypted_key"]
+                })
+    except Exception as e:
+        print(f"Polling error: {e}")
+    finally:
+        await consumer.stop()
+    return {"keys": keys}
+
+
 
 @app.get("/chat/{username}/publickey")
-async def get_public_key(username: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_public_key(username: str, db: Session = Depends(get_db)):
     """
     Retrieves the public key of a target user for E2EE initialization.
 
     Args:
         username (str): Target username.
         db (Session): Database session.
-        current_user (User): Authenticated requester.
 
     Returns:
         dict: {"public_key": str}
@@ -372,4 +415,4 @@ async def get_public_key(username: str, db: Session = Depends(get_db), current_u
     user = db.query(User).filter(User.username == username).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return {"public_key": user.public_key}
+    return {"public-key": user.public_key}
