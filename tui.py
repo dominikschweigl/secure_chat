@@ -109,18 +109,26 @@ class MainScreen(Screen):
         self.current_recipient = event.item.username
         self.query_one("#chat-header").update(f"Chatting with [bold]{self.current_recipient}[/]")
         # Clear the message area for the new contact
-        self.query_one("#message-list").query("*").remove()
+        self.query_one("#message-list").remove_children()
         # Load message history for the selected contact
+        self.update_selected_chat()
+
+    
+    def update_selected_chat(self) -> None:
+        """Refresh the message list for the currently selected contact."""
+        if not self.current_recipient:
+            return
         try:
             history = self.app.client.get_message_history(self.current_recipient)
             msg_list = self.query_one("#message-list")
+            msg_list.remove_children()
             for msg in history:
                 self_sent = (msg["sender"] == self.app.client.username)
                 msg_list.mount(Message(msg["sender"], msg["message"], self_sent=self_sent))
             msg_list.scroll_end()
         except Exception as e:
             self.app.notify(f"History Load Error: {e}", severity="error")
-    
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Send an encrypted message when Enter is pressed."""
         if not self.current_recipient:
@@ -146,14 +154,14 @@ class MainScreen(Screen):
         """Callback triggered by the backend's MessageWorker thread."""
         if sender == self.current_recipient:
             # Use call_from_thread to safely update UI from the background thread
-            self.call_from_thread(self.display_incoming, sender, message)
+            self.app.call_from_thread(self.display_incoming, sender, message)
         else:
-            self.call_from_thread(self.app.notify, f"New message from {sender}")
+            self.app.call_from_thread(self.app.notify, f"New message from {sender}")
 
     def display_incoming(self, sender: str, text: str) -> None:
         """Render the incoming message in the UI."""
         msg_list = self.query_one("#message-list")
-        msg_list.mount(Message(sender, text, self_sent=False))
+        msg_list.mount(Message(sender, text, self_sent=(sender == self.app.client.username)))
         msg_list.scroll_end()
 
 class ChatApp(App):
