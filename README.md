@@ -9,7 +9,6 @@ A secure command-line chat application using **public-key** and **symmetric-key 
 ---
 
 ## TODO
-- encrypt password during login/registration
 - encrypt session-key in the request headers to the server
 - logout endpoint gives unauthorized error
 

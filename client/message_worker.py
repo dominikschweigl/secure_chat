@@ -7,7 +7,7 @@ class MessageWorker:
     """
     Periodically polls for new messages from the user's inbox.
     """
-    def __init__(self, server_address: str, endpoint: str, interval_seconds: int = 2):
+    def __init__(self, server_address: str, endpoint: str, interval_seconds: int = 1):
         self.server_address = server_address
         self.endpoint = endpoint
         self.interval_seconds = interval_seconds

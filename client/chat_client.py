@@ -61,10 +61,12 @@ class ChatClient:
         # generate user rsa key pair
         rsa_key = RSA.generate(2048)
         public_key = rsa_key.public_key().export_key().decode('utf-8')
+
+        hashed_password = SHA256.new(password.encode('utf-8')).hexdigest()
         
         response = requests.post(
             f"{self.server_address}{self.REGISTER_ENDPOINT}", 
-            json={'username': username, 'password': password, 'public-key': public_key}
+            json={'username': username, 'password': hashed_password, 'public-key': public_key}
         )
         response.raise_for_status()
 
@@ -80,9 +82,11 @@ class ChatClient:
             requests.exceptions.HTTPError: If login fails (401 for invalid password, 404 for non-existent username)
             requests.exceptions.RequestException: If the request fails
         """
+        hashed_password = SHA256.new(password.encode('utf-8')).hexdigest()
+        
         response = requests.post(
             f"{self.server_address}{self.LOGIN_ENDPOINT}", 
-            json={'username': username, 'password': password}
+            json={'username': username, 'password': hashed_password}
         )
         response.raise_for_status()
 
