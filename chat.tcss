@@ -12,18 +12,35 @@ Screen {
     width: 30;
     background: $panel;
     border-right: tall $primary;
+    height: 100%;
+}
+
+#user-label {
+    padding: 1;
+    background: $secondary;
+    color: white;
+    text-style: bold;
+    width: 100%;
+    border-bottom: solid $primary;
+    height: auto;
 }
 
 #sidebar-title {
+    width: 100%;
     padding: 1;
     background: $primary;
     color: white;
     text-style: bold;
 }
 
+#user-list {
+    height: 1fr;
+}
+
 /* Chat Area Styles */
 #chat-area {
     width: 1fr;
+    height: 100%;
 }
 
 #chat-header {
@@ -38,22 +55,43 @@ Screen {
     overflow-y: scroll;
 }
 
-/* Message Bubble Styles */
-.message {
-    margin: 1 0;
-    padding: 0 1;
-    background: $boost;
-    border-left: solid $secondary;
-    width: auto;
-    max-width: 80%;
+/* --- MESSAGE STYLES --- */
+
+/* The Row Container */
+.row-sent {
+    width: 100%;
+    height: auto;
+    align: right middle; /* Aligns the bubble to the right */
+    padding: 1;
 }
 
-.self-sent {
-    border-left: none;
+.row-received {
+    width: 100%;
+    height: auto;
+    align: left middle; /* Aligns the bubble to the left */
+    padding: 1;
+}
+
+/* The Text Bubble */
+.bubble {
+    width: auto;
+    max-width: 80%;
+    height: auto;
+    padding: 1 2;
+    background: $boost;
+}
+
+/* Style specific to SENT messages (Blue) */
+.row-sent .bubble {
+    background: $primary;
+    color: white;
     border-right: solid $accent;
-    background: $primary-darken-2;
-    margin-left: 15; 
-    text-align: right;
+}
+
+/* Style specific to RECEIVED messages (Gray) */
+.row-received .bubble {
+    background: $panel-lighten-1;
+    border-left: solid $accent;
 }
 
 #chat-input {
@@ -78,7 +116,6 @@ Screen {
     margin-bottom: 1;
 }
 
-/* Reset docking for inputs inside the login form */
 #login-form Input {
     dock: none;
     margin: 1 0;
