@@ -106,7 +106,7 @@ class MainScreen(Screen):
         if hasattr(self, "user_refresh"):
             self.user_refresh.stop()
 
-    # --- NEW: Handle the Logout Button ---
+    # Handle the Logout Button
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button clicks (specifically Logout)."""
         if event.button.id == "logout-btn":
@@ -119,7 +119,6 @@ class MainScreen(Screen):
             # Remove MainScreen, revealing LoginScreen underneath
             self.app.pop_screen()
             self.app.notify("Logged out")
-    # -------------------------------------
 
     def update_user_list(self) -> None:
         try:
