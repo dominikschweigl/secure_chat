@@ -8,6 +8,9 @@ A secure command-line chat application using **public-key** and **symmetric-key 
 
 ---
 
+## TODO
+- encrypt or hash session-key in the request headers to the server + change session key at every request (counter)
+
 ## Server API Endpoints
 
 ### Authentication

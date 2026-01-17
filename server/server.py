@@ -3,11 +3,11 @@ import os
 import secrets
 import hashlib
 import asyncio
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timezone, timedelta
+from typing import List, Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Header, status
-from sqlalchemy import create_engine, Column, String, Boolean, Text
+from sqlalchemy import create_engine, Column, String, DateTime, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel, Field
@@ -39,7 +39,7 @@ class User(Base):
     username = Column(String, primary_key=True, index=True)
     password_hash = Column(String)
     public_key = Column(Text)
-    is_online = Column(Boolean, default=False)
+    last_seen = Column(DateTime, nullable=True)
     session_key_hash = Column(String, nullable=True, index=True)
 
 Base.metadata.create_all(bind=engine)
@@ -59,9 +59,6 @@ class MessageSend(BaseModel):
 
 class KeyExchange(BaseModel):
     encrypted_key: str
-
-class PresenceUpdate(BaseModel):
-    online: bool
 
 app = FastAPI(title="Secure E2EE Chat Server")
 producer: Optional[AIOKafkaProducer] = None
@@ -144,7 +141,11 @@ def ensure_kafka_topic(username: str):
     try:
         admin_client = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS, client_id='admin')
         topic_name = f"user_queue_{username}"
-        admin_client.create_topics([NewTopic(name=topic_name, num_partitions=1, replication_factor=1)])
+        topic_name_key = f"user_queue_key_{username}"
+        admin_client.create_topics([
+            NewTopic(name=topic_name, num_partitions=1, replication_factor=1),
+            NewTopic(name=topic_name_key, num_partitions=1, replication_factor=1)
+        ])
         admin_client.close()
     except TopicAlreadyExistsError:
         pass
@@ -198,6 +199,8 @@ def login(user_data: UserLogin, db: Session = Depends(get_db)):
     Raises:
         HTTPException 401: If credentials are invalid.
     """
+    print("Login attempt for user:", user_data.username)
+    print("password:", user_data.password)
     user = db.query(User).filter(User.username == user_data.username).first()
     if not user or not pwd_context.verify(user_data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -212,7 +215,7 @@ def login(user_data: UserLogin, db: Session = Depends(get_db)):
 
 
 @app.post("/chat/auth/logout") 
-def logout(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def logout(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     Logs out the current user.
 
@@ -244,16 +247,15 @@ async def get_messages(current_user: User = Depends(get_current_user)):
     """
     topic = f"user_queue_{current_user.username}"
     consumer = AIOKafkaConsumer(
+        topic,
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         auto_offset_reset='earliest',
-        enable_auto_commit=False
+        enable_auto_commit=True,
+        group_id=f"client_{current_user.username}"
     )
     messages = []
     try:
         await consumer.start()
-        tp = TopicPartition(topic, 0)
-        consumer.assign([tp])
-        await consumer.seek_to_beginning(tp)
         data = await consumer.getmany(timeout_ms=1000)
         for tp_key, msgs in data.items():
             for msg in msgs:
@@ -262,10 +264,11 @@ async def get_messages(current_user: User = Depends(get_current_user)):
         print(f"Polling error: {e}")
     finally:
         await consumer.stop()
+    print(f"Retrieved messages: {messages} messages for user {current_user.username}")
     return {"messages": messages}
 
 
-@app.post("/chat/{username}")
+@app.post("/chat/{username}/send")
 async def send_message(username: str, data: MessageSend, current_user: User = Depends(get_current_user)):
     """
     Sends a chat message to a specific user.
@@ -289,10 +292,8 @@ async def send_message(username: str, data: MessageSend, current_user: User = De
     return {"status": "OK"}
 
 
-@app.post("/chat/presence/{username}")
-def update_presence(
-    username: str,
-    data: PresenceUpdate,
+@app.post("/presence")
+async def update_presence(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -300,26 +301,19 @@ def update_presence(
     Updates the online/offline presence of the authenticated user.
 
     Args:
-        username (str): Must match current user.
-        data (PresenceUpdate): {"online": bool}.
         db (Session): Database session.
         current_user (User): Authenticated user.
 
     Returns:
         dict: {"status": "OK"}
-
-    Raises:
-        HTTPException 403: If attempting to update another user's presence.
     """
-    if username != current_user.username:
-        raise HTTPException(status_code=403, detail="Cannot update other user's presence")
-    current_user.is_online = data.online
+    current_user.last_seen = datetime.utcnow()
     db.commit()
     return {"status": "OK"}
 
 
 @app.get("/chat/users")
-def list_users(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def list_users(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     Lists all registered users and their online status.
 
@@ -330,8 +324,13 @@ def list_users(db: Session = Depends(get_db), current_user: User = Depends(get_c
     Returns:
         list: [{"username": str, "online": bool}]
     """
-    users = db.query(User).all()
-    return [{"username": u.username, "online": u.is_online} for u in users]
+    users: List[User] = db.query(User).all()
+    return [
+        {
+            "username": u.username, 
+            "online": u.last_seen and u.last_seen > datetime.utcnow() - timedelta(seconds=6)
+        } for u in users
+    ]
 
 
 @app.post("/chat/{username}/keyexchange")
@@ -347,7 +346,7 @@ async def key_exchange(username: str, data: KeyExchange, current_user: User = De
     Returns:
         dict: {"status": "OK"}
     """
-    topic = f"user_queue_{username}"
+    topic = f"user_queue_key_{username}"
     payload = {
         "type": "KEY_EXCHANGE",
         "sender": current_user.username,
@@ -357,16 +356,55 @@ async def key_exchange(username: str, data: KeyExchange, current_user: User = De
     await producer.send_and_wait(topic, json.dumps(payload).encode())
     return {"status": "OK"}
 
+@app.get("/chat/keyexchange")
+async def get_key_exchanges(current_user: User = Depends(get_current_user)):
+    """
+    Retrieves all pending key exchanges for the authenticated user.
+
+    Args:
+        current_user (User): Authenticated user.
+    
+    Returns:
+        dict: {"keys": [
+            {"sender": str, "encrypted_key": str}
+        ]}
+    """
+
+    topic = f"user_queue_key_{current_user.username}"
+    consumer = AIOKafkaConsumer(
+        topic,
+        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+        auto_offset_reset='earliest',
+        enable_auto_commit=True,
+        group_id=f"client_key_{current_user.username}"
+    )
+    keys = []
+    try:
+        await consumer.start()
+        data = await consumer.getmany(timeout_ms=1000)
+        for tp_key, msgs in data.items():
+            for msg in msgs:
+                record = json.loads(msg.value.decode())
+                keys.append({
+                    "sender": record["sender"],
+                    "encrypted_key": record["encrypted_key"]
+                })
+    except Exception as e:
+        print(f"Polling error: {e}")
+    finally:
+        await consumer.stop()
+    return {"keys": keys}
+
+
 
 @app.get("/chat/{username}/publickey")
-def get_public_key(username: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_public_key(username: str, db: Session = Depends(get_db)):
     """
     Retrieves the public key of a target user for E2EE initialization.
 
     Args:
         username (str): Target username.
         db (Session): Database session.
-        current_user (User): Authenticated requester.
 
     Returns:
         dict: {"public_key": str}
@@ -377,4 +415,4 @@ def get_public_key(username: str, db: Session = Depends(get_db), current_user: U
     user = db.query(User).filter(User.username == username).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return {"public_key": user.public_key}
+    return {"public-key": user.public_key}

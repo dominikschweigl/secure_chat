@@ -1,3 +1,4 @@
+import json
 import requests
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import AES, PKCS1_OAEP
@@ -12,20 +13,18 @@ from .presence_worker import PresenceWorker
 from .message_store import MessageStore
 from .message_worker import MessageWorker
 
-# TODO: Implement session key management
-
 class ChatClient:
 
     REGISTER_ENDPOINT = "/chat/auth/register"
     LOGIN_ENDPOINT = "/chat/auth/login"
     LOGOUT_ENDPOINT = "/chat/auth/logout"
-    PRESENCE_ENDPOINT = "/chat/presence"
+    PRESENCE_ENDPOINT = "/presence"
     USERS_ENDPOINT = "/chat/users"
     PUBLIC_KEY_ENDPOINT = "/chat/{username}/publickey"
-    MESSAGE_ENDPOINT = "/chat/{username}"
+    MESSAGE_ENDPOINT = "/chat/{username}/send"
     KEY_EXCHANGE_ENDPOINT = "/chat/{username}/keyexchange"
     MESSAGES_ENDPOINT = "/chat/messages"
-    KEY_EXCHANGES_ENDPOINT = "/chat/keyexchanges"
+    GET_KEY_EXCHANGES_ENDPOINT = "/chat/keyexchange"
 
     def __init__(self, server_address: str, keystore: KeyStore | None = None):
         self.server_address: str = server_address
@@ -62,10 +61,12 @@ class ChatClient:
         # generate user rsa key pair
         rsa_key = RSA.generate(2048)
         public_key = rsa_key.public_key().export_key().decode('utf-8')
+
+        hashed_password = SHA256.new(password.encode('utf-8')).hexdigest()
         
         response = requests.post(
             f"{self.server_address}{self.REGISTER_ENDPOINT}", 
-            json={'username': username, 'password': password, 'public-key': public_key}
+            json={'username': username, 'password': hashed_password, 'public-key': public_key}
         )
         response.raise_for_status()
 
@@ -81,21 +82,32 @@ class ChatClient:
             requests.exceptions.HTTPError: If login fails (401 for invalid password, 404 for non-existent username)
             requests.exceptions.RequestException: If the request fails
         """
+        hashed_password = SHA256.new(password.encode('utf-8')).hexdigest()
+
         response = requests.post(
             f"{self.server_address}{self.LOGIN_ENDPOINT}", 
-            json={'username': username, 'password': password}
+            json={'username': username, 'password': hashed_password}
         )
         response.raise_for_status()
 
-        session_key = response.json().get('session-key')
+        # load private key for this user
+        self.rsa_key = self.keystore.load_own_key(username)
+
+        # encryption: cipher_rsa.encrypt(raw_key.encode()).hex()
+        encrypted_session_key = response.json().get('session-key')
+
+        cipher_rsa = PKCS1_OAEP.new(self.rsa_key, hashAlgo=SHA256)
+        decrypted_session_key = cipher_rsa.decrypt(bytes.fromhex(encrypted_session_key))
+        session_key = decrypted_session_key.decode('utf-8')
+
+        # Write session key to file
+        with open(f"keys/{username}/session_key.txt", "w") as f:
+            f.write(session_key)
 
         with self._state_lock:
             self.username = username
             self.session_key = session_key
             self.logged_in = True
-
-        # load private key for this user
-        self.rsa_key = self.keystore.load_own_key(username)
 
         # start presence heartbeats
         self.presence.start(session_key)
@@ -119,17 +131,17 @@ class ChatClient:
         if not self.logged_in:
             raise RuntimeError("You are not logged in.")
         
-        response = requests.post(
-            f"{self.server_address}{self.LOGOUT_ENDPOINT}", 
-            data={'session-key': self.session_key}
-        )
-        response.raise_for_status()
+        # stop message polling
+        self.message_worker.stop()
 
         # stop presence heartbeats
         self.presence.stop()
         
-        # stop message polling
-        self.message_worker.stop()
+        response = requests.post(
+            f"{self.server_address}{self.LOGOUT_ENDPOINT}",
+            headers={'X-Session-Key': self.session_key}
+        )
+        response.raise_for_status()
 
         with self._state_lock:
             self.username = None
@@ -153,13 +165,17 @@ class ChatClient:
             requests.exceptions.RequestException: If the request fails
         """
         response = requests.get(
-            f"{self.server_address}{self.USERS_ENDPOINT}"
+            f"{self.server_address}{self.USERS_ENDPOINT}",
+            headers={'X-Session-Key': self.session_key}
         )
         response.raise_for_status()
         
         users_data = response.json()
+
+        with open(f"keys/{self.username}/users.json", "w") as f:
+            f.write(json.dumps(users_data, indent=4))
         
-        return users_data.get('users', [])
+        return users_data
     
     def send_message(self, recipient_username: str, message: str) -> None:
         """
@@ -185,19 +201,21 @@ class ChatClient:
         if not self.is_logged_in():
             raise RuntimeError("You must be logged in to send messages.")
         
-        # Get or establish symmetric key with recipient
-        symmetric_key = self._get_or_establish_symmetric_key(recipient_username)
-        
-        # Encrypt the message
-        encrypted_message = self._encrypt_message(message, symmetric_key)
-        
-        endpoint = self.MESSAGE_ENDPOINT.format(username=recipient_username)
-        response = requests.post(
-            f"{self.server_address}{endpoint}",
-            data={'message': encrypted_message}
-        )
+        if recipient_username != self.username:
+            # Get or establish symmetric key with recipient
+            symmetric_key = self._get_or_establish_symmetric_key(recipient_username)
+            
+            # Encrypt the message
+            encrypted_message = self._encrypt_message(message, symmetric_key)
+            
+            endpoint = self.MESSAGE_ENDPOINT.format(username=recipient_username)
+            response = requests.post(
+                f"{self.server_address}{endpoint}",
+                json={'message': encrypted_message},
+                headers={'X-Session-Key': self.session_key}
+            )
 
-        response.raise_for_status()
+            response.raise_for_status()
 
         self.message_store.save_message(
             self.username, recipient_username,
@@ -293,12 +311,19 @@ class ChatClient:
         cipher_rsa = PKCS1_OAEP.new(recipient_rsa_key)
         encrypted_key = base64.b64encode(cipher_rsa.encrypt(symmetric_key)).decode('utf-8')
         
+        with open('./errors/decryption.log', 'a') as f:
+            f.write(f'Sending symmetric key to {recipient_username}\n')
+        
         endpoint = self.KEY_EXCHANGE_ENDPOINT.format(username=recipient_username)
         response = requests.post(
             f"{self.server_address}{endpoint}",
-            data={'encrypted_key': encrypted_key}
+            json={'encrypted_key': encrypted_key, "sender": self.username},
+            headers={'X-Session-Key': self.session_key}
         )
         response.raise_for_status()
+        
+        with open('./errors/decryption.log', 'a') as f:
+            f.write(f'✓ Symmetric key sent to {recipient_username}\n')
     
     def _fetch_and_process_key_exchanges(self) -> None:
         """
@@ -306,20 +331,32 @@ class ChatClient:
         This is called when looking for a key that doesn't exist locally.
         """
         if not self.is_logged_in():
+            with open('./errors/decryption.log', 'a') as f:
+                f.write('Not logged in, skipping key exchange fetch\n')
             return
         
         try:
             # Fetch key exchange messages from the dedicated queue
+            with open('./errors/decryption.log', 'a') as f:
+                f.write(f'Fetching key exchanges from {self.GET_KEY_EXCHANGES_ENDPOINT}\n')
+            
             response = requests.get(
-                f"{self.server_address}{self.KEY_EXCHANGES_ENDPOINT}"
+                f"{self.server_address}{self.GET_KEY_EXCHANGES_ENDPOINT}",
+                headers={'X-Session-Key': self.session_key}
             )
             response.raise_for_status()
             key_exchanges = response.json().get('keys', [])
+            
+            with open('./errors/decryption.log', 'a') as f:
+                f.write(f'Fetched {len(key_exchanges)} key exchange messages\n')
             
             # Process all received key exchange messages
             for key_msg in key_exchanges:
                 sender = key_msg.get('sender')
                 encrypted_key = key_msg.get('encrypted_key')
+                
+                with open('./errors/decryption.log', 'a') as f:
+                    f.write(f'Processing key exchange from {sender}\n')
                 
                 if sender and encrypted_key:
                     try:
@@ -335,11 +372,14 @@ class ChatClient:
                                 current_username = self.username
                             self.keystore.save_symmetric_key(current_username, sender, symmetric_key)
                         
-                        print(f"Received and stored symmetric key from {sender}")
+                        with open('./errors/decryption.log', 'a') as f:
+                            f.write(f'✓ Received and stored symmetric key from {sender}\n')
                     except Exception as e:
-                        print(f"Failed to decrypt key from {sender}: {e}")
+                        with open('./errors/decryption.log', 'a') as f:
+                            f.write(f'Failed to decrypt key from {sender}: {e}\n')
         except Exception as e:
-            print(f"Failed to fetch key exchanges: {e}")
+            with open('./errors/decryption.log', 'a') as f:
+                f.write(f'Failed to fetch key exchanges: {e}\n')
 
     def _get_public_key(self, username: str):
         """
@@ -365,7 +405,8 @@ class ChatClient:
         # Fetch from server
         endpoint = self.PUBLIC_KEY_ENDPOINT.format(username=username)
         response = requests.get(
-            f"{self.server_address}{endpoint}"
+            f"{self.server_address}{endpoint}",
+            headers={'X-Session-Key': self.session_key}
         )
         response.raise_for_status()
         
@@ -462,6 +503,9 @@ class ChatClient:
             sender = msg.get('sender')
             encrypted_content = msg.get('message')
             timestamp = msg.get('timestamp')
+
+            with open('./errors/decryption.log', 'a') as f:
+                f.write(f'Received message from {sender} at {timestamp}: {encrypted_content}\n')
             
             if not sender or not encrypted_content:
                 continue
@@ -470,14 +514,18 @@ class ChatClient:
             symmetric_key = self._get_symmetric_key(sender)
             if not symmetric_key:
                 # No key exists - skip this message (sender should have sent key first)
-                print(f"No symmetric key found for {sender}, skipping message")
+                with open('./errors/decryption.log', 'a') as f:
+                    f.write(f'No symmetric key for {sender} at {timestamp}, skipping message\n')
                 continue
             
             # Decrypt the message
             try:
                 plaintext = self._decrypt_message(encrypted_content, symmetric_key)
-            except Exception:
-                print("Failed to decrypt message from", sender)
+                with open('./errors/decryption.log', 'a') as f:
+                    f.write(f'Decrypted message from {sender} at {timestamp}: {plaintext}\n')
+            except Exception as e:
+                with open('./errors/decryption.log', 'a') as f:
+                    f.write(f'Decryption failed for message from {sender} at {timestamp}: {e}\n')
                 continue
             
             # Store in MessageStore
@@ -493,6 +541,21 @@ class ChatClient:
             # Trigger message received callback
             if self.on_message_received:
                 self.on_message_received(sender, plaintext, timestamp)
+    
+    def get_message_history(self, contact_username: str):
+        """
+        Retrieve message history with a specific contact.
+        
+        Args:
+            contact_username: The contact's username
+            
+        Returns:
+            list: List of message dicts with keys: sender, recipient, message, timestamp
+        """
+        with self._state_lock:
+            current_username = self.username
+        
+        return self.message_store.load_messages(current_username, contact_username)
     
     def is_logged_in(self) -> bool:
         return self.logged_in
