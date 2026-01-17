@@ -76,6 +76,7 @@ class MainScreen(Screen):
                 
                 yield Label(" ONLINE USERS", id="sidebar-title")
                 yield ListView(id="user-list")
+                # This is the button you added
                 yield Button("Logout", variant="error", id="logout-btn")
             
             # Main chat area
@@ -92,23 +93,11 @@ class MainScreen(Screen):
         except:
             pass
 
-        """Fetch users from the server and start periodic updates."""
         self.current_recipient = None
         self.app.client.on_message_received = self.handle_new_message
 
+        # Initial fetch and periodic update
         self.update_user_list()
-        self.user_refresh = self.set_interval(5, self.update_user_list)
-
-    def on_unmount(self) -> None:
-        if self.app.client.on_message_received is self.handle_new_message:
-            self.app.client.on_message_received = None
-        if hasattr(self, "user_refresh"):
-            self.user_refresh.stop()
-        # Register callback *when this screen is active*
-        self.app.client.on_message_received = self.handle_new_message
-        # Initial fetch
-        self.update_user_list()
-        # Periodically update the user list every 3 seconds
         self.user_refresh = self.set_interval(3, self.update_user_list)
 
     def on_unmount(self) -> None:
@@ -117,59 +106,67 @@ class MainScreen(Screen):
         if hasattr(self, "user_refresh"):
             self.user_refresh.stop()
 
+    # --- NEW: Handle the Logout Button ---
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button clicks (specifically Logout)."""
+        if event.button.id == "logout-btn":
+            try:
+                self.app.client.logout()
+            except Exception:
+                # Even if the server request fails, we still want to exit the screen
+                pass
+            
+            # Remove MainScreen, revealing LoginScreen underneath
+            self.app.pop_screen()
+            self.app.notify("Logged out")
+    # -------------------------------------
+
     def update_user_list(self) -> None:
         try:
             users = self.app.client.get_users()
-            users = self.app.client.get_users()
+            users.sort(key=lambda u: u["username"])
+            
             user_list = self.query_one("#user-list")
-            user_list.clear()
-
+            
+            existing_items = {
+                child.username: child 
+                for child in user_list.children 
+                if hasattr(child, "username")
+            }
+            
+            seen_usernames = set()
 
             for user in users:
+                username = user["username"]
+                seen_usernames.add(username)
+                
                 status = "🟢" if user.get("online") else "⚪"
-                username = user["username"] + " (You)" if user["username"] == self.app.client.username else user["username"]
-                item = ListItem(Static(f"{status} {username}"))
-                item.username = user["username"]
-                user_list.mount(item)
+                display_name = f"{username} (You)" if username == self.app.client.username else username
+                label_text = f"{status} {display_name}"
+                
+                if username in existing_items:
+                    item = existing_items[username]
+                    try:
+                        static_widget = item.query_one(Static)
+                        static_widget.update(label_text)
+                    except:
+                        pass
+                else:
+                    item = ListItem(Static(label_text))
+                    item.username = username
+                    user_list.mount(item)
+            
+            for username, item in existing_items.items():
+                if username not in seen_usernames:
+                    item.remove()
                 
         except Exception as e:
-            self.app.notify(f"Error: {e}", severity="error")
-    
-                status = "🟢" if user.get("online") else "⚪"
-                item = ListItem(Static(f"{status} {user['username']}"))
-                item.username = user["username"]
-                user_list.mount(item)
-                
-        except Exception as e:
-            self.app.notify(f"Error: {e}", severity="error")
+            pass
     
     def on_list_view_selected(self, event: ListView.Selected) -> None:
-        """Switch chat context when a user is selected in the list."""
-        self.current_recipient = event.item.username
         self.current_recipient = event.item.username
         self.query_one("#chat-header").update(f"Chatting with [bold]{self.current_recipient}[/]")
-        # Clear the message area for the new contact
-        self.query_one("#message-list").remove_children()
-        # Load message history for the selected contact
-        self.update_selected_chat()
-
-    
-    def update_selected_chat(self) -> None:
-        """Refresh the message list for the currently selected contact."""
-        if not self.current_recipient:
-            return
-        try:
-            history = self.app.client.get_message_history(self.current_recipient)
-            msg_list = self.query_one("#message-list")
-            msg_list.remove_children()
-            for msg in history:
-                self_sent = (msg["sender"] == self.app.client.username)
-                msg_list.mount(Message(msg["sender"], msg["message"], self_sent=self_sent))
-            msg_list.scroll_end()
-        except Exception as e:
-            self.app.notify(f"History Load Error: {e}", severity="error")
         
-        # Clear and reload history
         msg_list = self.query_one("#message-list")
         msg_list.query("*").remove()
 
@@ -190,13 +187,13 @@ class MainScreen(Screen):
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if not self.current_recipient:
-            self.app.app.notify("Please select a user first", severity="warning")
+            self.app.notify("Please select a user first", severity="warning")
             return
 
         message_text = event.value.strip()
         if message_text:
             try:
-                self.app.app.client.send_message(self.current_recipient, message_text)
+                self.app.client.send_message(self.current_recipient, message_text)
                 
                 msg_list = self.query_one("#message-list")
                 msg_list.mount(Message("Me", message_text, self_sent=True))
@@ -204,14 +201,13 @@ class MainScreen(Screen):
                 self.query_one("#chat-input").value = ""
                 msg_list.scroll_end()
             except Exception as e:
-                self.app.app.notify(f"Send Error: {e}", severity="error")
+                self.app.notify(f"Send Error: {e}", severity="error")
         
     def handle_new_message(self, sender: str, message: str, timestamp: str) -> None:
         if sender == self.current_recipient:
-            self.app.call_from_thread(self.display_incoming, sender, message)
+            self.call_from_thread(self.display_incoming, sender, message)
         else:
             self.call_from_thread(self.app.notify, f"New message from {sender}")
-            self.app.call_from_thread(self.app.notify, f"New message from {sender}")
 
     def display_incoming(self, sender: str, text: str) -> None:
         msg_list = self.query_one("#message-list")

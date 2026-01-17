@@ -130,3 +130,10 @@ Screen {
 #login-buttons Button {
     margin: 0 1;
 }
+
+/* Logout Button Style */
+#logout-btn {
+    width: 100%;
+    margin-top: 1;
+    border: none;
+}
