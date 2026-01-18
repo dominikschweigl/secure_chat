@@ -1,5 +1,9 @@
 import requests
 import threading
+from datetime import datetime, timezone
+from Crypto.Hash import SHA256, HMAC
+
+from .auth_utils import get_auth_headers
 
 class PresenceWorker:
     """
@@ -29,13 +33,22 @@ class PresenceWorker:
     def _run(self, session_key: str):
         while not self._stop_event.wait(self.interval_seconds):
             try:
+                # 1. Presence uses an empty body
+                request_body = ""
+                
+                # 2. Get headers explicitly tied to that empty body
+                headers = get_auth_headers(session_key, request_body)
+                headers['Content-Type'] = 'application/json'
+
+                # 3. Send request
                 response = requests.post(
                     f"{self.server_address}{self.endpoint}",
-                    headers={"X-Session-Key": session_key}
+                    data=request_body,
+                    headers=headers,
+                    timeout=5 # Good practice to add a timeout for worker threads
                 )
                 response.raise_for_status()
             except requests.RequestException as e:
-                # Swallow presence errors; keep trying until stopped
                 with open('./errors/presence_errors.log', 'a') as f:
-                    f.write(f'Presence update failed: {e}\n')
+                    f.write(f'[{datetime.now()}] Presence update failed: {e}\n')
                 continue

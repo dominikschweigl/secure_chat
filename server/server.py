@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from aiokafka import AIOKafkaProducer, AIOKafkaConsumer, TopicPartition
 from kafka.admin import KafkaAdminClient, NewTopic
 from kafka.errors import TopicAlreadyExistsError
+from fastapi import Request
 
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP
@@ -25,10 +26,21 @@ DB_DIR = "data"
 DB_NAME = "server.db"
 DATABASE_URL = f"sqlite:///./{DB_DIR}/{DB_NAME}"
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_URL", "kafka:9092")
+SERVER_KEY_PATH = os.path.join(DB_DIR, "server_private.pem")
 CHALLENGE_TIMEOUT_SECONDS = 60
 
 if not os.path.exists(DB_DIR):
     os.makedirs(DB_DIR)
+
+if os.path.exists(SERVER_KEY_PATH):
+    with open(SERVER_KEY_PATH, "rb") as f:
+        server_rsa_key = RSA.import_key(f.read())
+else:
+    server_rsa_key = RSA.generate(2048)
+    with open(SERVER_KEY_PATH, "wb") as f:
+        f.write(server_rsa_key.export_key())
+
+_reg_nonce_cache: dict = {}
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -73,13 +85,20 @@ class User(Base):
     password_hash = Column(String)
     public_key = Column(Text)
     last_seen = Column(DateTime, nullable=True)
-    session_key_hash = Column(String, nullable=True, index=True)
+    session_key = Column(String, nullable=True, index=True)  # Store plaintext for HMAC validation
 
 Base.metadata.create_all(bind=engine)
 
 class UserRegister(BaseModel):
     username: str
     password: str
+    public_key: str = Field(..., alias="public-key")
+    class Config: populate_by_name = True
+
+class SecureRegister(BaseModel):
+    username: str
+    payload: str  # Hex-encoded RSA encrypted bundle: "hashed_password|nonce"
+    nonce: str
     public_key: str = Field(..., alias="public-key")
     class Config: populate_by_name = True
 
@@ -102,6 +121,19 @@ class KeyExchange(BaseModel):
 
 app = FastAPI(title="Secure E2EE Chat Server")
 producer: Optional[AIOKafkaProducer] = None
+
+# Middleware to cache request body so it can be read multiple times
+@app.middleware("http")
+async def cache_request_body(request, call_next):
+    """Ensure the raw body is available for signature verification."""
+    body = await request.body()
+    request._body = body # Cache the raw bytes
+    
+    async def receive():
+        return {"type": "http.request", "body": body}
+    
+    request._receive = receive
+    return await call_next(request)
 
 @app.on_event("startup")
 async def startup_event():
@@ -142,31 +174,62 @@ def get_db():
 
 
 async def get_current_user(
-    x_session_key: Optional[str] = Header(None, alias="X-Session-Key"), 
+    x_request_signature: Optional[str] = Header(None, alias="X-Request-Signature"),
+    x_request_timestamp: Optional[str] = Header(None, alias="X-Request-Timestamp"),
+    request: Request = None, 
     db: Session = Depends(get_db)
 ):
     """
-    Dependency to authenticate the user via session key.
+    Dependency to authenticate requests using HMAC-based signatures.
+    
+    Validates that the request signature matches the session key and prevents replay attacks
+    using timestamp validation.
 
     Args:
-        x_session_key (str): Session key sent in request header.
+        x_request_signature (str): HMAC-SHA256 signature of request body + timestamp.
+        x_request_timestamp (str): ISO format timestamp of request.
+        request: The FastAPI request object for getting raw body.
         db (Session): Database session.
 
     Returns:
         User: Authenticated user.
 
     Raises:
-        HTTPException 401: If session key is missing or invalid.
+        HTTPException 401: If signature is missing or invalid.
     """
-    if not x_session_key:
-        raise HTTPException(status_code=401, detail="Session key missing")
-
-    incoming_key_hash = hashlib.sha256(x_session_key.encode()).hexdigest()
-    user = db.query(User).filter(User.session_key_hash == incoming_key_hash).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid session")
-    return user
-
+    if not x_request_signature or not x_request_timestamp:
+        raise HTTPException(status_code=401, detail="Signature or timestamp missing")
+    
+    # 1. Validate timestamp window (Replay Protection)
+    try:
+        request_time = datetime.fromisoformat(x_request_timestamp.replace('Z', '+00:00'))
+        current_time = datetime.now(timezone.utc)
+        if abs((current_time - request_time).total_seconds()) > 30:
+            raise HTTPException(status_code=401, detail="Request timestamp expired")
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid timestamp format")
+    
+    # 2. Get RAW request body
+    # We use the cached body from your middleware to ensure we don't break the request stream
+    body_bytes = getattr(request, '_body', b"")
+    request_body_str = body_bytes.decode('utf-8') if body_bytes else ""
+    
+    # 3. Construct the same string the client signed
+    # Format must be exactly: "body|timestamp"
+    incoming_signature_data = f"{request_body_str}|{x_request_timestamp}".encode('utf-8')
+    
+    # 4. Verify against active sessions
+    users = db.query(User).filter(User.session_key.isnot(None)).all()
+    for user in users:
+        # Generate the expected HMAC using the stored session_key
+        hmac_obj = HMAC.new(user.session_key.encode('utf-8'), digestmod=SHA256)
+        hmac_obj.update(incoming_signature_data)
+        expected_signature = hmac_obj.hexdigest()
+        
+        if x_request_signature == expected_signature:
+            return user
+    
+    raise HTTPException(status_code=401, detail="Invalid request signature")
 
 def ensure_kafka_topic(username: str):
     """
@@ -193,33 +256,55 @@ def ensure_kafka_topic(username: str):
         pass
 
 
+@app.get("/chat/auth/register-challenge")
+async def get_register_challenge():
+    """Provides the server's public key and a unique nonce for secure registration."""
+    nonce = secrets.token_hex(16)
+    expiration = datetime.now(timezone.utc) + timedelta(minutes=5)
+    _nonce_cache[nonce] = (expiration, "REGISTRATION_PENDING")
+    
+    return {
+        "public_key": server_rsa_key.public_key().export_key().decode('utf-8'),
+        "nonce": nonce
+    }
+
 @app.post("/chat/auth/register")
-def register(user_data: UserRegister, db: Session = Depends(get_db)):
-    """
-    Registers a new user.
+def register(user_data: SecureRegister, db: Session = Depends(get_db)):
+    """Registers a new user by decrypting the RSA payload and storing the shared secret."""
+    # 1. Nonce validation (using your existing validate_and_consume_nonce)
+    if not validate_and_consume_nonce(user_data.nonce, "REGISTRATION_PENDING"):
+        raise HTTPException(status_code=400, detail="Invalid or expired registration nonce")
 
-    Args:
-        user_data (UserRegister): Username, password (as SHA256 hash), and public key.
-        db (Session): Database session.
+    # 2. Decrypt the payload using Server's Private Key
+    try:
+        encrypted_bytes = bytes.fromhex(user_data.payload)
+        # Use SHA256 as the hashAlgo to match the client's PKCS1_OAEP setting
+        cipher_rsa = PKCS1_OAEP.new(server_rsa_key, hashAlgo=SHA256)
+        decrypted_bundle = cipher_rsa.decrypt(encrypted_bytes).decode('utf-8')
+        
+        # Expected format from client: "client_sha256_hash|nonce"
+        password_hash, received_nonce = decrypted_bundle.split('|')
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Decryption failed: {str(e)}")
 
-    Returns:
-        dict: {"status": "success"} on success.
+    # 3. Verify Nonce inside the encrypted bundle matches the one outside
+    if received_nonce != user_data.nonce:
+        raise HTTPException(status_code=400, detail="Nonce integrity check failed")
 
-    Raises:
-        HTTPException 400: If username is already taken.
-    """
+    # 4. Check if user exists
     if db.query(User).filter(User.username == user_data.username).first():
         raise HTTPException(status_code=400, detail="Username taken")
+
+    # 5. Store user (Storing the raw password_hash so HMAC login works)
     new_user = User(
         username=user_data.username,
-        password_hash=user_data.password,
+        password_hash=password_hash,  # Shared secret for HMAC
         public_key=user_data.public_key
     )
     db.add(new_user)
     db.commit()
     ensure_kafka_topic(user_data.username)
     return {"status": "success"}
-
 
 @app.post("/chat/auth/login-challenge")
 def login_challenge(data: LoginChallenge, db: Session = Depends(get_db)):
@@ -294,7 +379,7 @@ def login(proof_data: LoginProof, db: Session = Depends(get_db)):
     
     # Generate session key
     raw_key = secrets.token_hex(32)
-    user.session_key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    user.session_key = raw_key  # Store plaintext for HMAC validation
     db.commit()
     db.refresh(user)
     
@@ -320,8 +405,7 @@ async def logout(db: Session = Depends(get_db), current_user: User = Depends(get
     Returns:
         dict: {"status": "OK"}
     """
-    current_user.session_key_hash = None
-    current_user.is_online = False
+    current_user.session_key = None
     db.commit()
     return {"status": "OK"}
 

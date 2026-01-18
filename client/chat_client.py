@@ -7,11 +7,13 @@ from Crypto.Hash import SHA256, HMAC
 from Crypto.Util.Padding import pad, unpad
 import base64
 import threading
+from datetime import datetime, timezone
 
 from .key_store import KeyStore
 from .presence_worker import PresenceWorker
 from .message_store import MessageStore
 from .message_worker import MessageWorker
+from .auth_utils import get_auth_headers
 
 class ChatClient:
 
@@ -53,26 +55,53 @@ class ChatClient:
 
     def register(self, username: str, password: str):
         """
-        Register a new user with the given username and password.
+        Register a new user with the given username and password as well as a server nonce.
         
         Raises:
             requests.exceptions.HTTPError: If registration fails (409 for existing username)
             requests.exceptions.RequestException: If the request fails
         """
-        # generate user rsa key pair
-        rsa_key = RSA.generate(2048)
-        public_key = rsa_key.public_key().export_key().decode('utf-8')
-
-        hashed_password = SHA256.new(password.encode('utf-8')).hexdigest()
+        # 1. Phase 1: Request Registration Challenge (Server PubKey + Nonce)
+        challenge_response = requests.get(f"{self.server_address}/chat/auth/register-challenge")
+        challenge_response.raise_for_status()
+        challenge_data = challenge_response.json()
         
+        server_pub_key_str = challenge_data.get('public_key')
+        reg_nonce = challenge_data.get('nonce')
+
+        # 2. Prepare Encryption
+        server_public_key = RSA.import_key(server_pub_key_str)
+        cipher_rsa = PKCS1_OAEP.new(server_public_key, hashAlgo=SHA256)
+
+        # 3. Bundle Password and Nonce to prevent Replay Attacks
+        # We hash the password first so the server never sees the raw string
+        hashed_password = SHA256.new(password.encode('utf-8')).hexdigest()
+        registration_bundle = f"{hashed_password}|{reg_nonce}"
+        
+        # 4. Encrypt the bundle with the Server's Public Key
+        encrypted_payload = cipher_rsa.encrypt(registration_bundle.encode('utf-8'))
+
+        # 5. Generate client's own RSA key pair for future messaging
+        rsa_key = RSA.generate(2048)
+        my_public_key_pem = rsa_key.public_key().export_key().decode('utf-8')
+
+        # 6. Phase 2: Send the encrypted registration data
         response = requests.post(
             f"{self.server_address}{self.REGISTER_ENDPOINT}", 
-            json={'username': username, 'password': hashed_password, 'public-key': public_key}
+            json={
+                'username': username, 
+                'payload': encrypted_payload.hex(), # The encrypted bundle
+                'nonce': reg_nonce,                 # Tells the server which nonce to verify
+                'public-key': my_public_key_pem     # Your public key for the directory
+            }
         )
         response.raise_for_status()
 
-        self.username = username
-        self.rsa_key = rsa_key
+        # 7. Finalize local state
+        with self._state_lock:
+            self.username = username
+            self.rsa_key = rsa_key
+        
         self.keystore.save_own_key(username, rsa_key)
 
     def login(self, username: str, password: str):
@@ -179,7 +208,8 @@ class ChatClient:
         
         response = requests.post(
             f"{self.server_address}{self.LOGOUT_ENDPOINT}",
-            headers={'X-Session-Key': self.session_key}
+            data="",
+            headers={**get_auth_headers(self.session_key, ""), 'Content-Type': 'application/json'}
         )
         response.raise_for_status()
 
@@ -206,7 +236,7 @@ class ChatClient:
         """
         response = requests.get(
             f"{self.server_address}{self.USERS_ENDPOINT}",
-            headers={'X-Session-Key': self.session_key}
+            headers=get_auth_headers(self.session_key)
         )
         response.raise_for_status()
         
@@ -240,7 +270,8 @@ class ChatClient:
         """
         if not self.is_logged_in():
             raise RuntimeError("You must be logged in to send messages.")
-        
+    
+        # 1. Logic for sending to others
         if recipient_username != self.username:
             # Get or establish symmetric key with recipient
             symmetric_key = self._get_or_establish_symmetric_key(recipient_username)
@@ -249,26 +280,33 @@ class ChatClient:
             encrypted_message = self._encrypt_message(message, symmetric_key)
             
             endpoint = self.MESSAGE_ENDPOINT.format(username=recipient_username)
+            
+            request_body = json.dumps({'message': encrypted_message}, separators=(',', ':'))
+            
+            # Ensure headers use the same compact string
+            headers = get_auth_headers(self.session_key, request_body)
+            headers['Content-Type'] = 'application/json'
+
             response = requests.post(
                 f"{self.server_address}{endpoint}",
-                json={'message': encrypted_message},
-                headers={'X-Session-Key': self.session_key}
+                data=request_body,
+                headers=headers
             )
-
             response.raise_for_status()
 
+        # This writes to messages/{self.username}/{recipient_username}.json
         self.message_store.save_message(
-            self.username, recipient_username,
+            username=self.username,
+            contact_username=recipient_username,
             sender=self.username,
             recipient=recipient_username,
             message=message,
             encrypted=False
         )
         
-        # Trigger message sent callback
         if self.on_message_sent:
+            # The UI should listen to this and immediately redraw the chat window
             self.on_message_sent(recipient_username, message)
-
 
     def _get_symmetric_key(self, contact_username: str) -> bytes | None:
         """
@@ -355,10 +393,11 @@ class ChatClient:
             f.write(f'Sending symmetric key to {recipient_username}\n')
         
         endpoint = self.KEY_EXCHANGE_ENDPOINT.format(username=recipient_username)
+        request_body = json.dumps({'encrypted_key': encrypted_key, "sender": self.username})
         response = requests.post(
             f"{self.server_address}{endpoint}",
-            json={'encrypted_key': encrypted_key, "sender": self.username},
-            headers={'X-Session-Key': self.session_key}
+            data=request_body,
+            headers={**get_auth_headers(self.session_key, request_body), 'Content-Type': 'application/json'}
         )
         response.raise_for_status()
         
@@ -382,7 +421,7 @@ class ChatClient:
             
             response = requests.get(
                 f"{self.server_address}{self.GET_KEY_EXCHANGES_ENDPOINT}",
-                headers={'X-Session-Key': self.session_key}
+                headers=get_auth_headers(self.session_key)
             )
             response.raise_for_status()
             key_exchanges = response.json().get('keys', [])
@@ -446,7 +485,7 @@ class ChatClient:
         endpoint = self.PUBLIC_KEY_ENDPOINT.format(username=username)
         response = requests.get(
             f"{self.server_address}{endpoint}",
-            headers={'X-Session-Key': self.session_key}
+            headers=get_auth_headers(self.session_key)
         )
         response.raise_for_status()
         
