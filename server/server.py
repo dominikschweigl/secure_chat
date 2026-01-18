@@ -17,7 +17,7 @@ from kafka.errors import TopicAlreadyExistsError
 
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP
-from Crypto.Hash import SHA256
+from Crypto.Hash import SHA256, HMAC
 from passlib.context import CryptContext
 
 # --- Configuration ---
@@ -25,6 +25,7 @@ DB_DIR = "data"
 DB_NAME = "server.db"
 DATABASE_URL = f"sqlite:///./{DB_DIR}/{DB_NAME}"
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_URL", "kafka:9092")
+CHALLENGE_TIMEOUT_SECONDS = 60
 
 if not os.path.exists(DB_DIR):
     os.makedirs(DB_DIR)
@@ -33,6 +34,38 @@ engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# In-memory nonce storage with expiration: {nonce: (expiration_time, username)}
+_nonce_cache: dict = {}
+
+def cleanup_expired_nonces():
+    """Remove expired nonces from cache."""
+    current_time = datetime.now(timezone.utc)
+    expired = [nonce for nonce, (exp_time, _) in _nonce_cache.items() if exp_time < current_time]
+    for nonce in expired:
+        del _nonce_cache[nonce]
+
+def get_or_create_nonce(username: str) -> str:
+    """Create a new nonce for challenge-response auth."""
+    cleanup_expired_nonces()
+    nonce = secrets.token_hex(16)
+    expiration = datetime.now(timezone.utc) + timedelta(seconds=CHALLENGE_TIMEOUT_SECONDS)
+    _nonce_cache[nonce] = (expiration, username)
+    return nonce
+
+def validate_and_consume_nonce(nonce: str, username: str) -> bool:
+    """Validate a nonce and remove it (single-use). Returns True if valid."""
+    cleanup_expired_nonces()
+    if nonce not in _nonce_cache:
+        return False
+    
+    exp_time, stored_username = _nonce_cache[nonce]
+    if stored_username != username:
+        return False
+    
+    # Nonce is valid, consume it
+    del _nonce_cache[nonce]
+    return True
 
 class User(Base):
     __tablename__ = "users"
@@ -50,9 +83,16 @@ class UserRegister(BaseModel):
     public_key: str = Field(..., alias="public-key")
     class Config: populate_by_name = True
 
-class UserLogin(BaseModel):
+class LoginChallenge(BaseModel):
     username: str
-    password: str
+
+class LoginChallengeResponse(BaseModel):
+    challenge: str  # RSA encrypted challenge
+
+class LoginProof(BaseModel):
+    username: str
+    challenge_response: str  # The nonce that was in the challenge
+    proof: str  # HMAC-SHA256 proof
 
 class MessageSend(BaseModel):
     message: str 
@@ -159,7 +199,7 @@ def register(user_data: UserRegister, db: Session = Depends(get_db)):
     Registers a new user.
 
     Args:
-        user_data (UserRegister): Username, password, and public key.
+        user_data (UserRegister): Username, password (as SHA256 hash), and public key.
         db (Session): Database session.
 
     Returns:
@@ -172,7 +212,7 @@ def register(user_data: UserRegister, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Username taken")
     new_user = User(
         username=user_data.username,
-        password_hash=pwd_context.hash(user_data.password),
+        password_hash=user_data.password,
         public_key=user_data.public_key
     )
     db.add(new_user)
@@ -181,37 +221,89 @@ def register(user_data: UserRegister, db: Session = Depends(get_db)):
     return {"status": "success"}
 
 
-@app.post("/chat/auth/login")
-def login(user_data: UserLogin, db: Session = Depends(get_db)):
+@app.post("/chat/auth/login-challenge")
+def login_challenge(data: LoginChallenge, db: Session = Depends(get_db)):
     """
-    Authenticates a user and generates a session key.
+    Phase 1 of challenge-response authentication.
+    
+    Issues an encrypted challenge that the client must solve using their private key
+    and the correct password to obtain a session token.
 
     Args:
-        user_data (UserLogin): Username and password.
+        data (LoginChallenge): Username only.
+        db (Session): Database session.
+
+    Returns:
+        dict: {"challenge": <RSA encrypted challenge with nonce and timestamp>}
+
+    Raises:
+        HTTPException 404: If user does not exist.
+    """
+    user = db.query(User).filter(User.username == data.username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Generate nonce and challenge
+    nonce = get_or_create_nonce(data.username)
+    timestamp = datetime.now(timezone.utc).isoformat()
+    challenge_data = f"{nonce}|{timestamp}|{data.username}"
+    
+    # Encrypt challenge with user's public key
+    recipient_key = RSA.import_key(user.public_key)
+    cipher_rsa = PKCS1_OAEP.new(recipient_key, hashAlgo=SHA256)
+    encrypted_challenge = cipher_rsa.encrypt(challenge_data.encode()).hex()
+    
+    return {"challenge": encrypted_challenge}
+
+
+@app.post("/chat/auth/login")
+def login(proof_data: LoginProof, db: Session = Depends(get_db)):
+    """
+    Phase 2 of challenge-response authentication.
+    
+    Validates the client's proof (HMAC of nonce with password hash) and issues
+    a session key if credentials are correct.
+
+    Args:
+        proof_data (LoginProof): Username, nonce from challenge, and HMAC proof.
         db (Session): Database session.
 
     Returns:
         dict: {"session-key": <RSA-encrypted session key>}
 
-    Notes:
-        The session key must be used in the X-Session-Key header for future requests.
-
     Raises:
-        HTTPException 401: If credentials are invalid.
+        HTTPException 401: If proof is invalid or nonce is invalid/expired.
+        HTTPException 404: If user does not exist.
     """
-    print("Login attempt for user:", user_data.username)
-    print("password:", user_data.password)
-    user = db.query(User).filter(User.username == user_data.username).first()
-    if not user or not pwd_context.verify(user_data.password, user.password_hash):
+    user = db.query(User).filter(User.username == proof_data.username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Validate and consume nonce (single-use)
+    if not validate_and_consume_nonce(proof_data.challenge_response, proof_data.username):
+        raise HTTPException(status_code=401, detail="Invalid or expired challenge")
+    
+    # Compute expected proof: HMAC-SHA256(nonce, password_hash)
+    hmac = HMAC.new(user.password_hash.encode(), digestmod=SHA256)
+    hmac.update(proof_data.challenge_response.encode())
+    expected_proof = hmac.hexdigest()
+    
+    # Verify proof
+    if proof_data.proof != expected_proof:
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Generate session key
     raw_key = secrets.token_hex(32)
     user.session_key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
-    user.is_online = True
     db.commit()
     db.refresh(user)
+    
+    # Encrypt session key with user's public key
     recipient_key = RSA.import_key(user.public_key)
     cipher_rsa = PKCS1_OAEP.new(recipient_key, hashAlgo=SHA256)
-    return {"session-key": cipher_rsa.encrypt(raw_key.encode()).hex()}
+    encrypted_session_key = cipher_rsa.encrypt(raw_key.encode()).hex()
+    
+    return {"session-key": encrypted_session_key}
 
 
 @app.post("/chat/auth/logout") 

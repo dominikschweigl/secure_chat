@@ -17,6 +17,7 @@ class ChatClient:
 
     REGISTER_ENDPOINT = "/chat/auth/register"
     LOGIN_ENDPOINT = "/chat/auth/login"
+    LOGIN_CHALLENGE_ENDPOINT = "/chat/auth/login-challenge"
     LOGOUT_ENDPOINT = "/chat/auth/logout"
     PRESENCE_ENDPOINT = "/presence"
     USERS_ENDPOINT = "/chat/users"
@@ -76,26 +77,65 @@ class ChatClient:
 
     def login(self, username: str, password: str):
         """
-        Log in a user with their credentials.
+        Log in a user with challenge-response authentication.
+        
+        Two-phase process:
+        1. Request a challenge from the server
+        2. Decrypt the challenge with private key and respond with HMAC proof
         
         Raises:
-            requests.exceptions.HTTPError: If login fails (401 for invalid password, 404 for non-existent username)
+            requests.exceptions.HTTPError: If login fails
             requests.exceptions.RequestException: If the request fails
+            RuntimeError: If challenge decryption fails
         """
+        # Load private key
+        self.rsa_key = self.keystore.load_own_key(username)
+        
+        # Hash password
         hashed_password = SHA256.new(password.encode('utf-8')).hexdigest()
-
+        
+        # Phase 1: Request challenge
         response = requests.post(
-            f"{self.server_address}{self.LOGIN_ENDPOINT}", 
-            json={'username': username, 'password': hashed_password}
+            f"{self.server_address}{self.LOGIN_CHALLENGE_ENDPOINT}",
+            json={'username': username}
         )
         response.raise_for_status()
-
-        # load private key for this user
-        self.rsa_key = self.keystore.load_own_key(username)
-
-        # encryption: cipher_rsa.encrypt(raw_key.encode()).hex()
+        
+        encrypted_challenge = response.json().get('challenge')
+        
+        # Decrypt challenge with private key
+        cipher_rsa = PKCS1_OAEP.new(self.rsa_key, hashAlgo=SHA256)
+        decrypted_challenge = cipher_rsa.decrypt(bytes.fromhex(encrypted_challenge)).decode('utf-8')
+        
+        # Parse challenge: nonce|timestamp|username
+        challenge_parts = decrypted_challenge.split('|')
+        if len(challenge_parts) != 3:
+            raise RuntimeError("Invalid challenge format")
+        
+        nonce, timestamp, challenge_username = challenge_parts
+        
+        # Verify username matches
+        if challenge_username != username:
+            raise RuntimeError("Challenge username mismatch")
+        
+        # Compute HMAC proof: HMAC-SHA256(nonce, password_hash)
+        hmac = HMAC.new(hashed_password.encode(), digestmod=SHA256)
+        hmac.update(nonce.encode())
+        proof = hmac.hexdigest()
+        
+        # Phase 2: Send proof and get session key
+        response = requests.post(
+            f"{self.server_address}{self.LOGIN_ENDPOINT}",
+            json={
+                'username': username,
+                'challenge_response': nonce,
+                'proof': proof
+            }
+        )
+        response.raise_for_status()
+        
+        # Decrypt session key
         encrypted_session_key = response.json().get('session-key')
-
         cipher_rsa = PKCS1_OAEP.new(self.rsa_key, hashAlgo=SHA256)
         decrypted_session_key = cipher_rsa.decrypt(bytes.fromhex(encrypted_session_key))
         session_key = decrypted_session_key.decode('utf-8')
