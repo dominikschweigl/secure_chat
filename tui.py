@@ -99,12 +99,15 @@ class MainScreen(Screen):
         # Initial fetch and periodic update
         self.update_user_list()
         self.user_refresh = self.set_interval(3, self.update_user_list)
+        self.message_refresh = self.set_interval(1, self.refresh_current_messages)
 
     def on_unmount(self) -> None:
         if self.app.client.on_message_received is self.handle_new_message:
             self.app.client.on_message_received = None
         if hasattr(self, "user_refresh"):
             self.user_refresh.stop()
+        if hasattr(self, "message_refresh"):
+            self.message_refresh.stop()
 
     # Handle the Logout Button
     async def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -159,6 +162,33 @@ class MainScreen(Screen):
                 if username not in seen_usernames:
                     item.remove()
                 
+        except Exception as e:
+            pass
+    
+    def refresh_current_messages(self) -> None:
+        """Periodically refresh the message list for the current recipient."""
+        if not self.current_recipient:
+            return
+        
+        try:
+            my_username = self.app.client.username
+            history = self.app.client.message_store.load_messages(my_username, self.current_recipient)
+            
+            msg_list = self.query_one("#message-list")
+            
+            # Get current message count
+            current_count = len(msg_list.children)
+            
+            # If new messages arrived, add them
+            if len(history) > current_count:
+                new_messages = history[current_count:]
+                for msg in new_messages:
+                    sender = msg.get("sender", "Unknown")
+                    text = msg.get("message", "")
+                    is_me = (sender == my_username)
+                    msg_list.mount(Message(sender, text, self_sent=is_me))
+                
+                msg_list.scroll_end()
         except Exception as e:
             pass
     
