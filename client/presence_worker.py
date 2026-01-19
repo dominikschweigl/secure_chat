@@ -1,3 +1,4 @@
+import os
 import requests
 import threading
 from datetime import datetime, timezone
@@ -49,6 +50,7 @@ class PresenceWorker:
                 )
                 response.raise_for_status()
             except requests.RequestException as e:
+                os.makedirs('./errors', exist_ok=True)
                 with open('./errors/presence_errors.log', 'a') as f:
                     f.write(f'[{datetime.now()}] Presence update failed: {e}\n')
                 continue

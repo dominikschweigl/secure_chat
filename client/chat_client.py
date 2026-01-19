@@ -1,4 +1,5 @@
 import json
+import os
 import requests
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import AES, PKCS1_OAEP
@@ -52,6 +53,8 @@ class ChatClient:
         self.on_login = None             # Callback(username: str)
         self.on_logout = None            # Callback()
         self.on_error = None             # Callback(error: str)
+
+        os.makedirs('./errors', exist_ok=True)
 
     def register(self, username: str, password: str):
         """
