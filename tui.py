@@ -98,8 +98,7 @@ class MainScreen(Screen):
 
         # Initial fetch and periodic update
         self.update_user_list()
-        self.user_refresh = self.set_interval(3, self.update_user_list)
-        self.message_refresh = self.set_interval(1, self.refresh_current_messages)
+        self.user_refresh = self.set_interval(1, self.update_user_list)
 
     def on_unmount(self) -> None:
         if self.app.client.on_message_received is self.handle_new_message:
@@ -165,39 +164,12 @@ class MainScreen(Screen):
         except Exception as e:
             pass
     
-    def refresh_current_messages(self) -> None:
-        """Periodically refresh the message list for the current recipient."""
-        if not self.current_recipient:
-            return
-        
-        try:
-            my_username = self.app.client.username
-            history = self.app.client.message_store.load_messages(my_username, self.current_recipient)
-            
-            msg_list = self.query_one("#message-list")
-            
-            # Get current message count
-            current_count = len(msg_list.children)
-            
-            # If new messages arrived, add them
-            if len(history) > current_count:
-                new_messages = history[current_count:]
-                for msg in new_messages:
-                    sender = msg.get("sender", "Unknown")
-                    text = msg.get("message", "")
-                    is_me = (sender == my_username)
-                    msg_list.mount(Message(sender, text, self_sent=is_me))
-                
-                msg_list.scroll_end()
-        except Exception as e:
-            pass
-    
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         self.current_recipient = event.item.username
         self.query_one("#chat-header").update(f"Chatting with [bold]{self.current_recipient}[/]")
         
         msg_list = self.query_one("#message-list")
-        msg_list.query("*").remove()
+        msg_list.remove_children()
 
         try:
             my_username = self.app.client.username
@@ -234,9 +206,9 @@ class MainScreen(Screen):
         
     def handle_new_message(self, sender: str, message: str, timestamp: str) -> None:
         if sender == self.current_recipient:
-            self.call_from_thread(self.display_incoming, sender, message)
+            self.app.call_from_thread(self.display_incoming, sender, message)
         else:
-            self.call_from_thread(self.app.notify, f"New message from {sender}")
+            self.app.call_from_thread(self.app.notify, f"New message from {sender}")
 
     def display_incoming(self, sender: str, text: str) -> None:
         msg_list = self.query_one("#message-list")
