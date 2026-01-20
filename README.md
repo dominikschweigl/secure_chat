@@ -12,17 +12,21 @@ A secure command-line chat application using **RSA (Public-Key)** and **AES (Sym
 ## Setup
 
 ### 1. Running the Server
-2. Navigate to the server directory: `cd server`
-1. Build the image: `docker-compose build`
-2. Start the service: `docker-compose up`
+1. Navigate to the server directory: `cd src/server`
+2. Build the image: `docker-compose build`
+3. Start the service: `docker-compose up`
 
 ### 2. Running the Client
-1. In order for the client to run, the necessary Python dependencies inside the `requirements.txt` need to be installed first. Install them with: `pip install -r requirements.txt`
-2. Then start the chat: `python3 tui.py` or `python tui.py`
+1. Open a new terminal window
+2. Navigate to the projects src directory: `cd src`
+3. In order for the client to run, the necessary Python dependencies inside the `requirements.txt` need to be installed first. Install them with: `pip install -r requirements.txt`
+4. Then start the chat: `python3 tui.py` or `python tui.py`
 
-> **Note**: It is recommended to use a python virtual environment for the client execution.
+There are no test users provided but a new user can simply be created by registering him with a username and password in the chat interface.
 
-> **Note:** Multiple client interfaces can be executed in parallel. For that simply run `python tui.py` in a new terminal window and log in with a different user.
+> **Note**: It is recommended to use a python virtual environment for the client execution and installation of the dependencies.
+
+> **Note:** Multiple client interfaces can be executed and tested in parallel. For that simply open a new terminal window for each user you want to check, navigate to the `src` folder, run `python tui.py` and log in with a different user.
 
 ## Security Architecture
 
