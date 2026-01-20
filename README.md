@@ -1,4 +1,4 @@
-# secure_chat
+# Secure Chat
 
 A secure command-line chat application using **RSA (Public-Key)** and **AES (Symmetric-Key) encryption**.
 
@@ -30,6 +30,34 @@ A secure command-line chat application using **RSA (Public-Key)** and **AES (Sym
 2. **HMAC Request Signing:** All protected endpoints require an `X-Request-Signature`. Requests are signed using a session key via HMAC-SHA256 to ensure integrity and prevent tampering.
 3. **Replay Protection:** All signed requests must include an `X-Request-Timestamp` valid within a 30-second window.
 4. **End-to-End Encryption (E2EE):** Chat messages are encrypted with symmetric AES keys, which are exchanged between users via RSA encryption.
+
+---
+
+## Communication & Security Flows
+
+The system implements a multi-layered security architecture utilizing `RSA-2048` for identity/key exchange and `AES-256-CBC` with `HMAC-SHA256` for message confidentiality and integrity. Below are the sequence flows for main operations in the application.
+
+### 1. User Registration
+Registration establishes the user's identity. The client generates a local RSA key pair and uploads the public component to the server's directory. A server-side nonce is used to protect the password during the initial registration.
+
+![User Registration Sequence](./assets/register_sequence.png)
+
+### 2. Challenge-Response Authentication
+To prevent credential sniffing and replay attacks, the login process uses a three-way handshake. The server issues an encrypted challenge that can only be decrypted by the holder of the account's private key.
+
+![Login Sequence](./assets/login_sequence.png)
+
+
+### 3. Symmetric Key Establishment
+The system uses Lazy Key Establishment. A 256-bit AES symmetric key is generated locally by the sender when the first message is initiated. This key is encrypted using the recipient's RSA Public Key and transmitted via a dedicated Kafka key-exchange topic.
+
+![Key Exchange Sequence](./assets/keyexchange_sequence.png)
+
+
+### 4. End-to-End Encrypted Messaging
+Once a shared secret exists, messages are encrypted using AES-CBC. To ensure integrity and prevent tampering (or padding oracle attacks), an HMAC-SHA256 tag is computed over the IV and ciphertext. The server and Kafka act as stateless transporters, never possessing the keys required to decrypt the payload.
+
+![Message Exchange Sequence](./assets/messageexchange_sequence.png)
 
 ---
 
