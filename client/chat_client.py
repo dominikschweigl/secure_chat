@@ -65,6 +65,8 @@ class ChatClient:
             requests.exceptions.RequestException: If the request fails
         """
         # Request Registration Challenge (Server PubKey + Nonce)
+        # Public key is sent for project scope, usually should not be trusted (MitM Attack)
+        # In practice hardcoded pub key / certificate should be used
         challenge_response = requests.get(f"{self.server_address}/chat/auth/register-challenge")
         challenge_response.raise_for_status()
         challenge_data = challenge_response.json()
@@ -77,8 +79,7 @@ class ChatClient:
         cipher_rsa = PKCS1_OAEP.new(server_public_key, hashAlgo=SHA256)
 
         # Bundle Password and Nonce to prevent Replay Attacks
-        hashed_password = SHA256.new(password.encode('utf-8')).hexdigest()
-        registration_bundle = f"{hashed_password}|{reg_nonce}"
+        registration_bundle = f"{password}|{reg_nonce}"
         
         # Encrypt the bundle with the Server's Public Key
         encrypted_payload = cipher_rsa.encrypt(registration_bundle.encode('utf-8'))
@@ -94,7 +95,7 @@ class ChatClient:
                 'username': username, 
                 'payload': encrypted_payload.hex(), # The encrypted bundle
                 'nonce': reg_nonce,                 # Tells the server which nonce to verify
-                'public-key': my_public_key_pem     # Your public key for the directory
+                'public-key': my_public_key_pem     # public key for the directory
             }
         )
         response.raise_for_status()
@@ -122,9 +123,6 @@ class ChatClient:
         # Load private key
         self.rsa_key = self.keystore.load_own_key(username)
         
-        # Hash password
-        hashed_password = SHA256.new(password.encode('utf-8')).hexdigest()
-        
         # Request challenge
         response = requests.post(
             f"{self.server_address}{self.LOGIN_CHALLENGE_ENDPOINT}",
@@ -132,36 +130,45 @@ class ChatClient:
         )
         response.raise_for_status()
         
-        encrypted_challenge = response.json().get('challenge')
+        response_data = response.json()
+
+        # Public key is sent for project scope, usually should not be trusted (MitM Attack)
+        # In practice hardcoded pub key / certificate should be used
+        server_pub_key_str = response_data.get('public_key')
+        encrypted_challenge = response_data.get('challenge')
         
         # Decrypt challenge with private key
         cipher_rsa = PKCS1_OAEP.new(self.rsa_key, hashAlgo=SHA256)
         decrypted_challenge = cipher_rsa.decrypt(bytes.fromhex(encrypted_challenge)).decode('utf-8')
         
-        # Parse challenge: nonce|timestamp|username
+        # Parse challenge: nonce|username
         challenge_parts = decrypted_challenge.split('|')
-        if len(challenge_parts) != 3:
+        if len(challenge_parts) != 2:
             raise RuntimeError("Invalid challenge format")
         
-        nonce, timestamp, challenge_username = challenge_parts
+        nonce, challenge_username = challenge_parts
         
         # Verify username matches
         if challenge_username != username:
             raise RuntimeError("Challenge username mismatch")
         
-        # Compute HMAC proof: HMAC-SHA256(nonce, password_hash)
-        hmac = HMAC.new(hashed_password.encode(), digestmod=SHA256)
-        hmac.update(nonce.encode())
+        # Compute HMAC proof: HMAC-SHA256(nonce, password)
+        password_hash = SHA256.new(password.encode('utf-8')).hexdigest()
+        hmac = HMAC.new(password_hash.encode('utf-8'), digestmod=SHA256)
+        hmac.update(nonce.encode('utf-8'))
         proof = hmac.hexdigest()
+
+        # Prepare Encryption
+        server_public_key = RSA.import_key(server_pub_key_str)
+        cipher_rsa = PKCS1_OAEP.new(server_public_key, hashAlgo=SHA256)
+
+        payload = f"{username}|{nonce}|{proof}".encode('utf-8')
+        encrypted_payload = cipher_rsa.encrypt(payload)
         
         # Send proof and get session key
         response = requests.post(
             f"{self.server_address}{self.LOGIN_ENDPOINT}",
-            json={
-                'username': username,
-                'challenge_response': nonce,
-                'proof': proof
-            }
+            json={'payload': encrypted_payload.hex()}
         )
         response.raise_for_status()
         

@@ -281,7 +281,7 @@ def register(user_data: SecureRegister, db: Session = Depends(get_db)):
         decrypted_bundle = cipher_rsa.decrypt(encrypted_bytes).decode('utf-8')
         
         # Expected format from client: "client_sha256_hash|nonce"
-        password_hash, received_nonce = decrypted_bundle.split('|')
+        password, received_nonce = decrypted_bundle.split('|')
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Decryption failed: {str(e)}")
 
@@ -293,10 +293,10 @@ def register(user_data: SecureRegister, db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == user_data.username).first():
         raise HTTPException(status_code=400, detail="Username taken")
 
-    # Store user (Storing the raw password_hash so HMAC login works)
+    # Store user
     new_user = User(
         username=user_data.username,
-        password_hash=password_hash,  # Shared secret for HMAC
+        password_hash=SHA256.new(password.encode('utf-8')).hexdigest(),
         public_key=user_data.public_key
     )
     db.add(new_user)
@@ -317,7 +317,7 @@ def login_challenge(data: LoginChallenge, db: Session = Depends(get_db)):
         db (Session): Database session.
 
     Returns:
-        dict: {"challenge": <RSA encrypted challenge with nonce and timestamp>}
+        dict: {"challenge": <RSA encrypted challenge with nonce>}
 
     Raises:
         HTTPException 404: If user does not exist.
@@ -328,63 +328,71 @@ def login_challenge(data: LoginChallenge, db: Session = Depends(get_db)):
     
     # Generate nonce and challenge
     nonce = get_or_create_nonce(data.username)
-    timestamp = datetime.now(timezone.utc).isoformat()
-    challenge_data = f"{nonce}|{timestamp}|{data.username}"
+    challenge_data = f"{nonce}|{data.username}"
     
     # Encrypt challenge with user's public key
     recipient_key = RSA.import_key(user.public_key)
     cipher_rsa = PKCS1_OAEP.new(recipient_key, hashAlgo=SHA256)
     encrypted_challenge = cipher_rsa.encrypt(challenge_data.encode()).hex()
     
-    return {"challenge": encrypted_challenge}
+    return {
+        "public_key": server_rsa_key.public_key().export_key().decode('utf-8'), # plaintext since it is assumed to be known
+        "challenge": encrypted_challenge
+    }
 
 
 @app.post("/chat/auth/login")
-def login(proof_data: LoginProof, db: Session = Depends(get_db)):
+def login(payload_data: dict, db: Session = Depends(get_db)):
     """
-    Phase 2 of challenge-response authentication.
-    
-    Validates the client's proof (HMAC of nonce with password hash) and issues
-    a session key if credentials are correct.
-
-    Args:
-        proof_data (LoginProof): Username, nonce from challenge, and HMAC proof.
-        db (Session): Database session.
-
-    Returns:
-        dict: {"session-key": <RSA-encrypted session key>}
-
-    Raises:
-        HTTPException 401: If proof is invalid or nonce is invalid/expired.
-        HTTPException 404: If user does not exist.
+    Phase 2 of challenge-response authentication: Decrypts the username|nonce|proof bundle and validates.
     """
-    user = db.query(User).filter(User.username == proof_data.username).first()
+    # Get the encrypted hex string from the request
+    encrypted_payload_hex = payload_data.get('payload')
+    if not encrypted_payload_hex:
+        raise HTTPException(status_code=400, detail="Missing payload")
+
+    try:
+        # Decrypt using the Server's Private Key
+        cipher_rsa = PKCS1_OAEP.new(server_rsa_key, hashAlgo=SHA256)
+        
+        decrypted_bundle = cipher_rsa.decrypt(bytes.fromhex(encrypted_payload_hex)).decode('utf-8')
+        
+        # Parse the bundle: username|nonce|proof
+        parts = decrypted_bundle.split('|')
+        if len(parts) != 3:
+            raise ValueError("Invalid bundle format")
+            
+        username, nonce, proof = parts
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Authentication failed")
+
+    # Find user and validate
+    user = db.query(User).filter(User.username == username).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Validate and consume nonce (single-use)
-    if not validate_and_consume_nonce(proof_data.challenge_response, proof_data.username):
-        raise HTTPException(status_code=401, detail="Invalid or expired challenge")
+    # Validate and consume nonce
+    if not validate_and_consume_nonce(nonce, username):
+        raise HTTPException(status_code=401, detail="Authentication failed")
     
-    # Compute expected proof: HMAC-SHA256(nonce, password_hash)
-    hmac = HMAC.new(user.password_hash.encode(), digestmod=SHA256)
-    hmac.update(proof_data.challenge_response.encode())
+    # Compute expected proof
+    password_hash = user.password_hash.encode()
+    hmac = HMAC.new(password_hash, digestmod=SHA256)
+    hmac.update(nonce.encode('utf-8'))
     expected_proof = hmac.hexdigest()
     
-    # Verify proof
-    if proof_data.proof != expected_proof:
+    if proof != expected_proof:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    # Generate session key
+    # Generate and Encrypt Session Key
     raw_key = secrets.token_hex(32)
-    user.session_key = raw_key  # Store plaintext for HMAC validation
+    user.session_key = raw_key 
     db.commit()
-    db.refresh(user)
     
-    # Encrypt session key with user's public key
-    recipient_key = RSA.import_key(user.public_key)
-    cipher_rsa = PKCS1_OAEP.new(recipient_key, hashAlgo=SHA256)
-    encrypted_session_key = cipher_rsa.encrypt(raw_key.encode()).hex()
+    # Encrypt with the User's public key so only the client can read it
+    user_public_key = RSA.import_key(user.public_key)
+    cipher_user = PKCS1_OAEP.new(user_public_key, hashAlgo=SHA256)
+    encrypted_session_key = cipher_user.encrypt(raw_key.encode()).hex()
     
     return {"session-key": encrypted_session_key}
 
