@@ -200,7 +200,7 @@ async def get_current_user(
     if not x_request_signature or not x_request_timestamp:
         raise HTTPException(status_code=401, detail="Signature or timestamp missing")
     
-    # 1. Validate timestamp window (Replay Protection)
+    # Validate timestamp window (Replay Protection)
     try:
         request_time = datetime.fromisoformat(x_request_timestamp.replace('Z', '+00:00'))
         current_time = datetime.now(timezone.utc)
@@ -209,16 +209,15 @@ async def get_current_user(
     except ValueError:
         raise HTTPException(status_code=401, detail="Invalid timestamp format")
     
-    # 2. Get RAW request body
-    # We use the cached body from your middleware to ensure we don't break the request stream
+    # Get RAW request body
     body_bytes = getattr(request, '_body', b"")
     request_body_str = body_bytes.decode('utf-8') if body_bytes else ""
     
-    # 3. Construct the same string the client signed
+    # Construct the same string the client signed
     # Format must be exactly: "body|timestamp"
     incoming_signature_data = f"{request_body_str}|{x_request_timestamp}".encode('utf-8')
     
-    # 4. Verify against active sessions
+    # Verify against active sessions
     users = db.query(User).filter(User.session_key.isnot(None)).all()
     for user in users:
         # Generate the expected HMAC using the stored session_key
@@ -271,14 +270,13 @@ async def get_register_challenge():
 @app.post("/chat/auth/register")
 def register(user_data: SecureRegister, db: Session = Depends(get_db)):
     """Registers a new user by decrypting the RSA payload and storing the shared secret."""
-    # 1. Nonce validation (using your existing validate_and_consume_nonce)
+    # Nonce validation
     if not validate_and_consume_nonce(user_data.nonce, "REGISTRATION_PENDING"):
         raise HTTPException(status_code=400, detail="Invalid or expired registration nonce")
 
-    # 2. Decrypt the payload using Server's Private Key
+    # Decrypt the payload using Server's Private Key
     try:
         encrypted_bytes = bytes.fromhex(user_data.payload)
-        # Use SHA256 as the hashAlgo to match the client's PKCS1_OAEP setting
         cipher_rsa = PKCS1_OAEP.new(server_rsa_key, hashAlgo=SHA256)
         decrypted_bundle = cipher_rsa.decrypt(encrypted_bytes).decode('utf-8')
         
@@ -287,15 +285,15 @@ def register(user_data: SecureRegister, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Decryption failed: {str(e)}")
 
-    # 3. Verify Nonce inside the encrypted bundle matches the one outside
+    # Verify Nonce inside the encrypted bundle matches the one outside
     if received_nonce != user_data.nonce:
         raise HTTPException(status_code=400, detail="Nonce integrity check failed")
 
-    # 4. Check if user exists
+    # Check if user exists
     if db.query(User).filter(User.username == user_data.username).first():
         raise HTTPException(status_code=400, detail="Username taken")
 
-    # 5. Store user (Storing the raw password_hash so HMAC login works)
+    # Store user (Storing the raw password_hash so HMAC login works)
     new_user = User(
         username=user_data.username,
         password_hash=password_hash,  # Shared secret for HMAC

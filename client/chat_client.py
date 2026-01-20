@@ -64,7 +64,7 @@ class ChatClient:
             requests.exceptions.HTTPError: If registration fails (409 for existing username)
             requests.exceptions.RequestException: If the request fails
         """
-        # 1. Phase 1: Request Registration Challenge (Server PubKey + Nonce)
+        # Request Registration Challenge (Server PubKey + Nonce)
         challenge_response = requests.get(f"{self.server_address}/chat/auth/register-challenge")
         challenge_response.raise_for_status()
         challenge_data = challenge_response.json()
@@ -72,23 +72,22 @@ class ChatClient:
         server_pub_key_str = challenge_data.get('public_key')
         reg_nonce = challenge_data.get('nonce')
 
-        # 2. Prepare Encryption
+        # Prepare Encryption
         server_public_key = RSA.import_key(server_pub_key_str)
         cipher_rsa = PKCS1_OAEP.new(server_public_key, hashAlgo=SHA256)
 
-        # 3. Bundle Password and Nonce to prevent Replay Attacks
-        # We hash the password first so the server never sees the raw string
+        # Bundle Password and Nonce to prevent Replay Attacks
         hashed_password = SHA256.new(password.encode('utf-8')).hexdigest()
         registration_bundle = f"{hashed_password}|{reg_nonce}"
         
-        # 4. Encrypt the bundle with the Server's Public Key
+        # Encrypt the bundle with the Server's Public Key
         encrypted_payload = cipher_rsa.encrypt(registration_bundle.encode('utf-8'))
 
-        # 5. Generate client's own RSA key pair for future messaging
+        # Generate client's own RSA key pair for future messaging
         rsa_key = RSA.generate(2048)
         my_public_key_pem = rsa_key.public_key().export_key().decode('utf-8')
 
-        # 6. Phase 2: Send the encrypted registration data
+        # Send the encrypted registration data
         response = requests.post(
             f"{self.server_address}{self.REGISTER_ENDPOINT}", 
             json={
@@ -100,7 +99,7 @@ class ChatClient:
         )
         response.raise_for_status()
 
-        # 7. Finalize local state
+        # Finalize local state
         with self._state_lock:
             self.username = username
             self.rsa_key = rsa_key
@@ -126,7 +125,7 @@ class ChatClient:
         # Hash password
         hashed_password = SHA256.new(password.encode('utf-8')).hexdigest()
         
-        # Phase 1: Request challenge
+        # Request challenge
         response = requests.post(
             f"{self.server_address}{self.LOGIN_CHALLENGE_ENDPOINT}",
             json={'username': username}
@@ -155,7 +154,7 @@ class ChatClient:
         hmac.update(nonce.encode())
         proof = hmac.hexdigest()
         
-        # Phase 2: Send proof and get session key
+        # Send proof and get session key
         response = requests.post(
             f"{self.server_address}{self.LOGIN_ENDPOINT}",
             json={
@@ -181,10 +180,10 @@ class ChatClient:
             self.session_key = session_key
             self.logged_in = True
 
-        # start presence heartbeats
+        # Start presence heartbeats
         self.presence.start(session_key)
         
-        # start message polling
+        # Start message polling
         self.message_worker.start(session_key, self._process_messages)
         
         # Trigger login callback
@@ -274,7 +273,7 @@ class ChatClient:
         if not self.is_logged_in():
             raise RuntimeError("You must be logged in to send messages.")
     
-        # 1. Logic for sending to others
+        # Logic for sending to others
         if recipient_username != self.username:
             # Get or establish symmetric key with recipient
             symmetric_key = self._get_or_establish_symmetric_key(recipient_username)
