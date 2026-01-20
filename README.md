@@ -65,6 +65,19 @@ Once a shared secret exists, messages are encrypted using AES-CBC. To ensure int
 
 ---
 
+---
+
+## Implementation Justification
+
+**Identity and Key Management with RSA:**  
+User identity and key distribution use RSA public-key cryptography. During registration and authentication, users generate local RSA key pairs, ensuring private keys are never exposed to the server or network. Challenges issued by the server through nonces, encrypted for the user, offer a method for verifying possession of private credentials without transmission of sensitive information, which should harden security against passive eavesdropping and replay attacks.
+
+**Message Confidentiality and Integrity with AES & HMAC:**  
+For ongoing chat communication, AES-256 in CBC mode is used to encrypt message payloads, chosen for its performance and security reputation. To guarantee the authenticity and integrity of messages, each encrypted payload is accompanied by an HMAC-SHA256 tag, protecting against message tampering and padding oracle vulnerabilities. Symmetric AES session keys are exchanged using RSA encryption for end-to-end encryption. This setup seemed simple and reliable since keys and sessions are verified by the server to belong to the registered user and usernames are unique. This current version however lacks a strategy of reliable updates of keys to ensure forward and backward secrecy at the moment.
+
+**Replay and Session Protection:**  
+All sensitive API requests must include a timestamp and HMAC signature. This design ensures requests are timely and verifiable, minimizing window for replay attacks and confirming that payloads originate from authenticated sessions.
+
 ## Server API Endpoints
 
 ### Authentication & Registration
